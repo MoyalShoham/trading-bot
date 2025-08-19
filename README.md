@@ -17,7 +17,7 @@ A fully asynchronous crypto trading bot for Binance Futures, written in Python. 
 
 ### 1. Clone the repository
 ```sh
-git clone https://github.com/MoyalShoham/crypto-bot-v2.git
+git clone https://github.com/MoyalShoham/trading-bot.git
 cd crypto-bot-v2
 ```
 
