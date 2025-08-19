@@ -4,7 +4,11 @@ SYMBOL_PRECISION = {
     'XRPUSDT': 1,
     'TRXUSDT': 0,
     'SPELLUSDT': 0,
-    # Add more symbols as needed
+    'ETHUSDT': 3,    # 0.001
+    'SOLUSDT': 2,    # 0.01
+    'BNBUSDT': 3,    # 0.001
+    'LINKUSDT': 2,   # 0.01
+    'NEARUSDT': 1,   # 0.1
 }
 
 import math

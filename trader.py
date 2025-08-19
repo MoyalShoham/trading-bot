@@ -16,9 +16,61 @@ import json
 
 from config import config
 from logger import logger
-from symbol_precision import round_quantity
+from symbol_precision import round_quantity, SYMBOL_PRECISION
+
+def round_price(symbol: str, price: float) -> float:
+    precision = SYMBOL_PRECISION.get(symbol, 2)
+    return float(f"{price:.{precision}f}")
 
 class BinanceTrader:
+
+    async def set_sltp_for_existing_positions(self):
+        """
+        Set Stop Loss and Take Profit orders for all existing open positions.
+        Logs success/failure for each SL/TP placement and prints all open orders after.
+        """
+        for symbol, position in self.positions.items():
+            side = position.get('side')
+            entry_price = position.get('entry_price')
+            quantity = position.get('quantity', position.get('size', 0))
+            if not side or not entry_price or not quantity:
+                logger.log_warning(f"Missing data for position {symbol}, skipping SLTP set.")
+                continue
+            if side == 'long':
+                stop_loss_price = entry_price * (1 - self.stop_loss_percent)
+                take_profit_price = entry_price * (1 + self.take_profit_percent)
+                order_side = 'BUY'
+            elif side == 'short':
+                stop_loss_price = entry_price * (1 + self.stop_loss_percent)
+                take_profit_price = entry_price * (1 - self.take_profit_percent)
+                order_side = 'SELL'
+            else:
+                logger.log_warning(f"Unknown side for position {symbol}, skipping SLTP set.")
+                continue
+            # Round prices and quantity
+            quantity = round_quantity(symbol, quantity)
+            stop_loss_price = round_price(symbol, stop_loss_price)
+            take_profit_price = round_price(symbol, take_profit_price)
+            # Place stop loss and take profit orders with error handling
+            try:
+                await self._place_stop_loss(symbol, order_side, quantity, stop_loss_price)
+                logger.log_info(f"SL set for {symbol} at {stop_loss_price}")
+            except Exception as e:
+                logger.log_error(f"Failed to set SL for {symbol}: {e}")
+            try:
+                await self._place_take_profit(symbol, order_side, quantity, take_profit_price)
+                logger.log_info(f"TP set for {symbol} at {take_profit_price}")
+            except Exception as e:
+                logger.log_error(f"Failed to set TP for {symbol}: {e}")
+        # After all, log all open orders for all symbols
+        try:
+            open_orders = await self.get_open_orders()
+            if open_orders:
+                logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}")
+            else:
+                logger.log_info("No open orders after SLTP set.")
+        except Exception as e:
+            logger.log_error(f"Error fetching open orders after SLTP set: {e}")
     async def initialize(self):
         """Ensure aiohttp session is initialized."""
         if not self.session or self.session.closed:
@@ -42,7 +94,7 @@ class BinanceTrader:
         self.min_balance_threshold = config.MIN_BALANCE_THRESHOLD
         
         # Trading state
-        self.positions = {}
+        self.positions = {}  # symbol: {side, entry_price, quantity}
         self.orders = {}
         self.balance = 0.0
         
@@ -305,8 +357,13 @@ class BinanceTrader:
             # Set leverage first
             await self.set_leverage(symbol, self.max_leverage)
             
-            # Round quantity to allowed precision
+
+            # Round quantity and SL/TP prices to allowed precision
             quantity = round_quantity(symbol, quantity)
+            if stop_loss is not None:
+                stop_loss = round_price(symbol, stop_loss)
+            if take_profit is not None:
+                take_profit = round_price(symbol, take_profit)
 
             # Prepare order parameters
             params = {
@@ -357,6 +414,8 @@ class BinanceTrader:
         """Place stop loss order."""
         try:
             stop_side = 'SELL' if side == 'BUY' else 'BUY'
+            quantity = round_quantity(symbol, quantity)
+            stop_loss_price = round_price(symbol, stop_loss_price)
             stop_params = {
                 'symbol': symbol,
                 'side': stop_side,
@@ -365,11 +424,9 @@ class BinanceTrader:
                 'stopPrice': stop_loss_price,
                 'reduceOnly': True
             }
-            
             response = await self._make_request('POST', '/fapi/v1/order', stop_params, signed=True)
             if response:
                 logger.log_info(f"Stop loss placed at {stop_loss_price} for {symbol}")
-            
         except Exception as e:
             logger.log_error(f"Error placing stop loss: {str(e)}")
     
@@ -377,6 +434,8 @@ class BinanceTrader:
         """Place take profit order."""
         try:
             tp_side = 'SELL' if side == 'BUY' else 'BUY'
+            quantity = round_quantity(symbol, quantity)
+            take_profit_price = round_price(symbol, take_profit_price)
             tp_params = {
                 'symbol': symbol,
                 'side': tp_side,
@@ -385,11 +444,9 @@ class BinanceTrader:
                 'stopPrice': take_profit_price,
                 'reduceOnly': True
             }
-            
             response = await self._make_request('POST', '/fapi/v1/order', tp_params, signed=True)
             if response:
                 logger.log_info(f"Take profit placed at {take_profit_price} for {symbol}")
-            
         except Exception as e:
             logger.log_error(f"Error placing take profit: {str(e)}")
     
@@ -451,88 +508,108 @@ class BinanceTrader:
             return False
     
     def check_risk_limits(self) -> Dict[str, Any]:
-        """Check if current positions meet risk management criteria."""
+        """Check if current positions meet risk management criteria. Handles missing leverage key safely."""
         risk_status = {
             'balance_ok': True,
             'leverage_ok': True,
             'position_size_ok': True,
             'overall_ok': True
         }
-        
         try:
             # Check balance threshold
             if self.balance < (self.balance * self.min_balance_threshold):
                 risk_status['balance_ok'] = False
                 risk_status['overall_ok'] = False
-            
-            # Check leverage
+            # Check leverage and position size for each position
             for symbol, position in self.positions.items():
-                if position['leverage'] > self.max_leverage:
+                # Use .get for leverage, fallback to self.max_leverage if missing
+                leverage = position.get('leverage', self.max_leverage)
+                if leverage > self.max_leverage:
                     risk_status['leverage_ok'] = False
                     risk_status['overall_ok'] = False
-                
-                # Check position size
-                position_value = position['size'] * position['entry_price']
+                # Use .get for size/entry_price for compatibility
+                size = position.get('size')
+                if size is None:
+                    size = position.get('quantity', 0)
+                entry_price = position.get('entry_price', 0)
+                position_value = size * entry_price
                 if position_value > (self.balance * self.max_position_size):
                     risk_status['position_size_ok'] = False
                     risk_status['overall_ok'] = False
-            
             return risk_status
-            
         except Exception as e:
-            logger.log_error(f"Error checking risk limits: {str(e)}")
+            logger.log_error(f"Error checking risk limits: {str(e)} (position={position if 'position' in locals() else None})")
             return {'overall_ok': False}
     
+
     async def execute_signal(self, signal: Dict[str, Any]) -> Optional[Dict]:
         """
-        Execute a trading signal.
-        
-        Args:
-            signal: Trading signal from strategy
-            
-        Returns:
-            Execution result or None if failed
+        Execute a trading signal with real PnL and balance tracking.
         """
         try:
             if not signal or signal.get('signal') == 'no-trade':
                 logger.log_info("No trading signal to execute")
                 return None
-            
+
             symbol = signal['symbol']
             signal_type = signal['signal']
-            
-            # Get current price
             current_price = await self.get_symbol_price(symbol)
             if not current_price:
                 logger.log_error(f"Could not get price for {symbol}")
                 return None
-            
+
             # Check risk limits
             risk_status = self.check_risk_limits()
             if not risk_status['overall_ok']:
                 logger.log_warning(f"Risk limits exceeded for {symbol}")
                 return None
-            
-            # Calculate position size
+
+            # Determine side and prices (always set SLTP for new positions)
             if signal_type == 'long_bias':
                 side = 'BUY'
-                stop_loss_price = current_price * (1 - self.stop_loss_percent)
-                take_profit_price = current_price * (1 + self.take_profit_percent)
             elif signal_type == 'short_bias':
                 side = 'SELL'
-                stop_loss_price = current_price * (1 + self.stop_loss_percent)
-                take_profit_price = current_price * (1 - self.take_profit_percent)
             else:
                 logger.log_warning(f"Unknown signal type: {signal_type}")
                 return None
-            
+
+            # Always calculate SLTP for new positions
+            if side == 'BUY':
+                stop_loss_price = current_price * (1 - self.stop_loss_percent)
+                take_profit_price = current_price * (1 + self.take_profit_percent)
+            else:
+                stop_loss_price = current_price * (1 + self.stop_loss_percent)
+                take_profit_price = current_price * (1 - self.take_profit_percent)
+
             # Calculate quantity
             quantity = self.calculate_position_size(symbol, current_price, stop_loss_price)
             if quantity <= 0:
                 logger.log_error(f"Invalid position size calculated: {quantity}")
                 return None
-            
-            # Place the order
+
+            # Position tracking for PnL
+            prev_position = self.positions.get(symbol)
+            realized_pnl = 0.0
+            closing_trade = False
+
+            # If there is an open position in the opposite direction, close it and calculate PnL
+            if prev_position:
+                prev_side = prev_position['side']
+                prev_entry = prev_position['entry_price']
+                prev_qty = prev_position['quantity']
+                if (side == 'BUY' and prev_side == 'short') or (side == 'SELL' and prev_side == 'long'):
+                    closing_trade = True
+                    # Calculate PnL
+                    if prev_side == 'long':
+                        realized_pnl = (current_price - prev_entry) * prev_qty
+                    else:
+                        realized_pnl = (prev_entry - current_price) * prev_qty
+                    self.balance += realized_pnl
+                    logger.log_info(f"Closed {prev_side} position for {symbol} at {current_price}, PnL: {realized_pnl:.4f}, New balance: {self.balance:.4f}")
+                    # Remove position after closing
+                    self.positions.pop(symbol)
+
+            # Place the order (always pass SLTP)
             order_result = await self.place_order(
                 symbol=symbol,
                 side=side,
@@ -541,9 +618,16 @@ class BinanceTrader:
                 stop_loss=stop_loss_price,
                 take_profit=take_profit_price
             )
-            
+
             if order_result:
-                # Log the trade
+                # If opening a new position, track it
+                if not closing_trade:
+                    self.positions[symbol] = {
+                        'side': 'long' if side == 'BUY' else 'short',
+                        'entry_price': current_price,
+                        'quantity': quantity
+                    }
+
                 trade_data = {
                     'symbol': symbol,
                     'side': side,
@@ -551,20 +635,18 @@ class BinanceTrader:
                     'price': current_price,
                     'order_id': order_result.get('orderId', 'unknown'),
                     'status': order_result.get('status', 'unknown'),
-                    'pnl': 0.0,
+                    'pnl': realized_pnl,
                     'balance': self.balance
                 }
-                
                 logger.log_trade(trade_data)
-                
+                # Always set SLTP for all open positions after any position update
+                await self.set_sltp_for_existing_positions()
                 return {
                     'success': True,
                     'order': order_result,
                     'trade_data': trade_data
                 }
-            
             return None
-            
         except Exception as e:
             logger.log_error(f"Error executing signal: {str(e)}")
             return None

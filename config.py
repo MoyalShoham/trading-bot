@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
+    # === DATA PROVIDER ===
+    PROVIDER: str = os.getenv('PROVIDER', 'BINANCE')
+    CACHE_TTL_PRICES: int = int(os.getenv('CACHE_TTL_PRICES', '5'))
+    CACHE_TTL_KLINES: int = int(os.getenv('CACHE_TTL_KLINES', '60'))
     """Configuration class containing all bot settings."""
     
     # === BINANCE FUTURES API ===
@@ -27,20 +31,20 @@ class Config:
     TELEGRAM_CHAT_ID: str = os.getenv('TELEGRAM_CHAT_ID', '')
     
     # === TRADING CONFIGURATION ===
-    MAX_LEVERAGE: int = int(os.getenv('MAX_LEVERAGE', '3'))
-    RISK_PER_TRADE: float = float(os.getenv('RISK_PER_TRADE', '0.1'))
-    STOP_LOSS_PERCENT: float = float(os.getenv('STOP_LOSS_PERCENT', '0.05'))
-    TAKE_PROFIT_PERCENT: float = float(os.getenv('TAKE_PROFIT_PERCENT', '0.10'))
+    MAX_LEVERAGE: int = int(os.getenv('MAX_LEVERAGE', '5'))
+    RISK_PER_TRADE: float = float(os.getenv('RISK_PER_TRADE', '0.01'))
+    STOP_LOSS_PERCENT: float = float(os.getenv('STOP_LOSS_PERCENT', '0.01'))
+    TAKE_PROFIT_PERCENT: float = float(os.getenv('TAKE_PROFIT_PERCENT', '0.05'))
     
     # === DRY RUN MODE ===
-    DRY_RUN: bool = os.getenv('DRY_RUN', 'true').lower() == 'true'
+    DRY_RUN: bool = os.getenv('DRY_RUN', 'false').lower() == 'true'
     
     # === LOGGING ===
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
     LOG_TO_FILE: bool = os.getenv('LOG_TO_FILE', 'true').lower() == 'true'
     
     # === TRADING SYMBOLS ===
-    SYMBOLS: List[str] = [s.strip() for s in os.getenv('SYMBOLS', 'ETHUSDT,SOLUSDT').split(',') if s.strip()]
+    SYMBOLS: List[str] = [s.strip() for s in os.getenv('SYMBOLS', 'BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,LINKUSDT').split(',') if s.strip()]
     
     # === TIMEFRAMES ===
     TIMEFRAME_EXECUTION: str = '1m'
@@ -55,8 +59,8 @@ class Config:
     RETRY_DELAY: float = 1.0
     
     # === RISK MANAGEMENT ===
-    MAX_POSITION_SIZE: float = 0.2  # Max 10% of balance per position
-    MIN_BALANCE_THRESHOLD: float = 0.05  # Stop trading if balance drops below 5%
+    MAX_POSITION_SIZE: float = 0.1  # Max 10% of balance per position
+    MIN_BALANCE_THRESHOLD: float = 0.005  # Stop trading if balance drops below 0.5%
     
     # === PERFORMANCE OPTIMIZATION ===
     BATCH_FETCH_SIZE: int = int(os.getenv('BATCH_FETCH_SIZE', '10'))
@@ -70,6 +74,9 @@ class Config:
     # === MEMORY MANAGEMENT ===
     MAX_CACHE_SIZE: int = int(os.getenv('MAX_CACHE_SIZE', '1000'))
     CACHE_CLEANUP_INTERVAL: int = int(os.getenv('CACHE_CLEANUP_INTERVAL', '300'))  # 5 minutes
+
+    EXECUTION_INTERVAL: int = int(os.getenv('EXECUTION_INTERVAL', '60'))  # seconds between bot cycles
+    CONFIRMATION_INTERVAL: int = int(os.getenv('CONFIRMATION_INTERVAL', '300'))  # seconds between advisor confirmations
     
     @classmethod
     def validate_config(cls) -> Dict[str, Any]:
