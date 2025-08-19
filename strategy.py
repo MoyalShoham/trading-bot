@@ -18,12 +18,12 @@ class TradingStrategy:
     def __init__(self):
         """Initialize the trading strategy."""
         self.signal_thresholds = {
-            'rsi_oversold': 30,
-            'rsi_overbought': 70,
-            'bb_oversold': 0.2,
-            'bb_overbought': 0.8,
+            'rsi_oversold': 35,  # less strict
+            'rsi_overbought': 65,  # less strict
+            'bb_oversold': 0.25,  # less strict
+            'bb_overbought': 0.75,  # less strict
             'macd_threshold': 0.0,
-            'volume_threshold': 1.5  # Volume should be 1.5x average
+            'volume_threshold': 1.2  # less strict
         }
     
     def analyze_indicators(self, indicators: Dict[str, any]) -> Dict[str, Any]:
@@ -181,33 +181,31 @@ class TradingStrategy:
             # Calculate combined confidence
             combined_analysis['confidence'] = (indicator_score + advisor_confidence) / 2
             
-            # Determine trading signal based on regime and indicators
-            if regime == 'trend-up' and indicator_score > 0.3:
-                if advisor_confidence > 0.7:
+            # Determine trading signal based on regime and indicators (less conservative)
+            if regime == 'trend-up' and indicator_score > 0.15:
+                if advisor_confidence > 0.5:
                     combined_analysis['signal'] = 'long_bias'
-                    combined_analysis['reason'] = 'Strong bullish trend with high confidence'
-                    combined_analysis['risk_level'] = 'low'
-                else:
-                    combined_analysis['signal'] = 'long_bias'
-                    combined_analysis['reason'] = 'Bullish trend but moderate confidence'
+                    combined_analysis['reason'] = 'Bullish trend with sufficient confidence'
                     combined_analysis['risk_level'] = 'medium'
-            
-            elif regime == 'trend-down' and indicator_score < -0.3:
-                if advisor_confidence > 0.7:
-                    combined_analysis['signal'] = 'short_bias'
-                    combined_analysis['reason'] = 'Strong bearish trend with high confidence'
-                    combined_analysis['risk_level'] = 'low'
                 else:
+                    combined_analysis['signal'] = 'no-trade'
+                    combined_analysis['reason'] = 'Bullish trend but low advisor confidence'
+                    combined_analysis['risk_level'] = 'high'
+            elif regime == 'trend-down' and indicator_score < -0.15:
+                if advisor_confidence > 0.5:
                     combined_analysis['signal'] = 'short_bias'
-                    combined_analysis['reason'] = 'Bearish trend but moderate confidence'
+                    combined_analysis['reason'] = 'Bearish trend with sufficient confidence'
                     combined_analysis['risk_level'] = 'medium'
-            
+                else:
+                    combined_analysis['signal'] = 'no-trade'
+                    combined_analysis['reason'] = 'Bearish trend but low advisor confidence'
+                    combined_analysis['risk_level'] = 'high'
             elif regime == 'mean-reversion':
-                if indicator_score > 0.5:
+                if indicator_score > 0.25:
                     combined_analysis['signal'] = 'long_bias'
                     combined_analysis['reason'] = 'Mean reversion opportunity - oversold conditions'
                     combined_analysis['risk_level'] = 'medium'
-                elif indicator_score < -0.5:
+                elif indicator_score < -0.25:
                     combined_analysis['signal'] = 'short_bias'
                     combined_analysis['reason'] = 'Mean reversion opportunity - overbought conditions'
                     combined_analysis['risk_level'] = 'medium'
@@ -215,19 +213,16 @@ class TradingStrategy:
                     combined_analysis['signal'] = 'no-trade'
                     combined_analysis['reason'] = 'Mean reversion regime but no clear signal'
                     combined_analysis['risk_level'] = 'high'
-            
             elif regime == 'chop':
                 combined_analysis['signal'] = 'no-trade'
                 combined_analysis['reason'] = 'Choppy market - avoid trading'
                 combined_analysis['risk_level'] = 'high'
-            
             elif regime == 'uncertain':
                 combined_analysis['signal'] = 'no-trade'
                 combined_analysis['reason'] = 'Uncertain market conditions'
                 combined_analysis['risk_level'] = 'high'
-            
-            # Additional risk checks
-            if combined_analysis['confidence'] < 0.4:
+            # Additional risk checks (lowered threshold)
+            if combined_analysis['confidence'] < 0.2:
                 combined_analysis['signal'] = 'no-trade'
                 combined_analysis['reason'] += ' - Low confidence'
                 combined_analysis['risk_level'] = 'high'

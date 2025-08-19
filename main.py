@@ -52,7 +52,7 @@ class TradingBot:
         """Initialize the trading bot."""
         try:
             logger.log_info("Initializing Trading Bot...")
-            
+
             # Validate configuration
             if not config.is_valid():
                 issues = config.validate_config()
@@ -63,7 +63,11 @@ class TradingBot:
                     str(issues)
                 )
                 return False
-            
+
+            # Ensure notifier and trader sessions are initialized
+            await notifier.initialize()
+            await trader.initialize()
+
             # Initialize data structures first
             for symbol in self.symbols:
                 if symbol:  # Skip empty symbols
@@ -71,7 +75,7 @@ class TradingBot:
                     self.last_confirmation[symbol] = datetime.now() - timedelta(minutes=10)
                     self.symbol_data[symbol] = {}
                     self.advisor_cache[symbol] = {}
-            
+
             # Test Telegram integration
             logger.log_info("Testing Telegram integration...")
             try:
@@ -80,7 +84,7 @@ class TradingBot:
                     logger.log_warning("Telegram integration test failed")
             except Exception as e:
                 logger.log_warning(f"Telegram integration test failed: {str(e)}")
-            
+
             # Initialize trader
             if not config.DRY_RUN:
                 logger.log_info("Initializing trader...")
@@ -92,14 +96,14 @@ class TradingBot:
                         logger.log_warning("Failed to get account info")
                 except Exception as e:
                     logger.log_warning(f"Failed to initialize trader: {str(e)}")
-            
+
             logger.log_info("Trading Bot initialized successfully")
             await notifier.notify_info(
                 "Bot Started",
                 f"Trading bot initialized with {len([s for s in self.symbols if s])} symbols"
             )
             return True
-            
+
         except Exception as e:
             logger.log_error(f"Error initializing bot: {str(e)}")
             await notifier.notify_error(
@@ -448,13 +452,13 @@ class TradingBot:
         try:
             logger.log_info("Shutting down bot...")
             self.running = False
-            
+
             # Send shutdown notification
             await notifier.notify_info(
                 "Bot Shutdown",
                 "Trading bot is shutting down"
             )
-            
+
             # Generate summary
             runtime = datetime.now() - self.start_time
             summary = {
@@ -464,11 +468,14 @@ class TradingBot:
                 'total_trades': self.total_trades,
                 'total_pnl': self.total_pnl
             }
-            
+
             await notifier.send_daily_summary(summary)
-            
+
+            # Close notifier session
+            await notifier.close()
+
             logger.log_info("Bot shutdown completed")
-            
+
         except Exception as e:
             logger.log_error(f"Error during shutdown: {str(e)}")
     

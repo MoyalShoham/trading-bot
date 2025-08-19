@@ -15,6 +15,23 @@ from config import config
 from logger import logger
 
 class DataFetcher:
+    # CoinGecko ID mapping for supported symbols (can be set in .env as COINGECKO_ID_MAP)
+    import os
+    import json
+    _default_coingecko_id_map = {
+        "ADAUSDT": "cardano",
+        "XRPUSDT": "ripple",
+        "TRXUSDT": "tron",
+        "SPELLUSDT": "spell-token"
+    }
+    _env_map = os.getenv("COINGECKO_ID_MAP", None)
+    if _env_map:
+        try:
+            COINGECKO_ID_MAP = json.loads(_env_map)
+        except Exception:
+            COINGECKO_ID_MAP = _default_coingecko_id_map
+    else:
+        COINGECKO_ID_MAP = _default_coingecko_id_map
     """Fetches market data from multiple sources."""
     
     def __init__(self):
@@ -50,79 +67,11 @@ class DataFetcher:
     
     async def _get_symbol_mapping(self) -> Dict[str, str]:
         """
-        Get dynamic symbol mapping from CoinGecko API.
-        Falls back to config-based mapping if API fails.
+        Get CoinGecko ID mapping for supported symbols (dynamic from config).
         """
-        current_time = time.time()
-        
-        # Check cache first
-        if (current_time - self._last_mapping_update < self._mapping_cache_ttl 
-            and self._symbol_mapping_cache):
-            return self._symbol_mapping_cache
-        
-        try:
-            # Try to get supported coins from CoinGecko
-            url = f"{self.coingecko_base_url}/coins/list"
-            async with self.session.get(url) as response:
-                if response.status == 200:
-                    coins_data = await response.json()
-                    
-                    # Create mapping for configured symbols
-                    mapping = {}
-                    for symbol in config.SYMBOLS:
-                        # Extract base asset (remove USDT suffix)
-                        base_asset = symbol.replace('USDT', '').lower()
-                        
-                        # Find matching coin in CoinGecko data
-                        for coin in coins_data:
-                            if coin['symbol'].lower() == base_asset:
-                                mapping[symbol] = coin['id']
-                                break
-                        
-                        # Fallback: use common mappings for popular coins
-                        if symbol not in mapping:
-                            fallback_mappings = {
-                                'ETHUSDT': 'ethereum',
-                                'BTCUSDT': 'bitcoin',
-                                'SOLUSDT': 'solana',
-                                'ADAUSDT': 'cardano',
-                                'DOTUSDT': 'polkadot',
-                                'LINKUSDT': 'chainlink',
-                                'MATICUSDT': 'matic-network',
-                                'AVAXUSDT': 'avalanche-2',
-                                'UNIUSDT': 'uniswap',
-                                'ATOMUSDT': 'cosmos',
-                                'XRPUSDT': 'ripple',
-                                'TRXUSDT': 'tron'
-                            }
-                            mapping[symbol] = fallback_mappings.get(symbol, '')
-                    
-                    self._symbol_mapping_cache = mapping
-                    self._last_mapping_update = current_time
-                    logger.log_info(f"Updated symbol mapping: {mapping}")
-                    return mapping
-                    
-        except Exception as e:
-            logger.log_warning(f"Failed to fetch symbol mapping from CoinGecko: {str(e)}")
-        
-        # Fallback to config-based mapping
-        fallback_mapping = {}
-        for symbol in config.SYMBOLS:
-            base_asset = symbol.replace('USDT', '').lower()
-            # Use common names for popular coins
-            if base_asset == 'eth':
-                fallback_mapping[symbol] = 'ethereum'
-            elif base_asset == 'btc':
-                fallback_mapping[symbol] = 'bitcoin'
-            elif base_asset == 'sol':
-                fallback_mapping[symbol] = 'solana'
-            else:
-                fallback_mapping[symbol] = base_asset
-        
-        self._symbol_mapping_cache = fallback_mapping
-        self._last_mapping_update = current_time
-        logger.log_info(f"Using fallback symbol mapping: {fallback_mapping}")
-        return fallback_mapping
+        mapping = {symbol: self.COINGECKO_ID_MAP.get(symbol, "") for symbol in config.SYMBOLS}
+        logger.log_info(f"Using CoinGecko symbol mapping: {mapping}")
+        return mapping
 
     async def fetch_binance_klines(
         self, 
@@ -187,58 +136,69 @@ class DataFetcher:
             return None
     
     async def fetch_coingecko_data(
-        self, 
-        coin_id: str, 
-        days: int = 1
+        self,
+        coin_id: str,
+        days: int = 1,
+        max_retries: int = 5,
+        base_delay: float = 1.0
     ) -> Optional[Dict]:
         """
-        Fetch additional market data from CoinGecko.
-        
+        Fetch additional market data from CoinGecko with retry and exponential backoff on rate limit (429).
         Args:
             coin_id: CoinGecko coin ID (e.g., 'ethereum', 'solana')
             days: Number of days of data to fetch
-            
+            max_retries: Maximum number of retries on failure
+            base_delay: Initial delay for backoff
         Returns:
             Dictionary with market data or None if failed
         """
         if not self.session:
             logger.log_error("Session not initialized")
             return None
-            
+
         url = f"{self.coingecko_base_url}/coins/{coin_id}/market_chart"
         params = {
             'vs_currency': 'usd',
             'days': days
         }
-        
-        try:
-            async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    
-                    # Extract price and volume data
-                    prices = data.get('prices', [])
-                    volumes = data.get('total_volumes', [])
-                    
-                    if prices and volumes:
-                        # Convert to more usable format
-                        market_data = {
-                            'prices': [(pd.to_datetime(price[0], unit='ms'), price[1]) for price in prices],
-                            'volumes': [(pd.to_datetime(vol[0], unit='ms'), vol[1]) for vol in volumes],
-                            'current_price': prices[-1][1] if prices else None,
-                            'current_volume': volumes[-1][1] if volumes else None
-                        }
-                        
-                        logger.log_info(f"Fetched CoinGecko data for {coin_id}")
-                        return market_data
-                    
-                else:
-                    logger.log_error(f"Failed to fetch CoinGecko data: {response.status}")
-                    return None
-                    
-        except Exception as e:
-            logger.log_error(f"Error fetching CoinGecko data: {str(e)}")
-            return None
+
+        attempt = 0
+        while attempt < max_retries:
+            try:
+                async with self.session.get(url, params=params) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        prices = data.get('prices', [])
+                        volumes = data.get('total_volumes', [])
+                        if prices and volumes:
+                            market_data = {
+                                'prices': [(pd.to_datetime(price[0], unit='ms'), price[1]) for price in prices],
+                                'volumes': [(pd.to_datetime(vol[0], unit='ms'), vol[1]) for vol in volumes],
+                                'current_price': prices[-1][1] if prices else None,
+                                'current_volume': volumes[-1][1] if volumes else None
+                            }
+                            logger.log_info(f"Fetched CoinGecko data for {coin_id}")
+                            return market_data
+                        else:
+                            logger.log_error(f"No price/volume data from CoinGecko for {coin_id}")
+                            return None
+                    elif response.status == 429:
+                        delay = base_delay * (2 ** attempt)
+                        logger.log_warning(f"CoinGecko rate limit hit (429). Retrying in {delay:.1f}s (attempt {attempt+1}/{max_retries})...")
+                        await asyncio.sleep(delay)
+                        attempt += 1
+                        continue
+                    else:
+                        logger.log_error(f"Failed to fetch CoinGecko data: {response.status}")
+                        return None
+            except Exception as e:
+                logger.log_error(f"Error fetching CoinGecko data: {str(e)}")
+                delay = base_delay * (2 ** attempt)
+                logger.log_warning(f"Retrying CoinGecko fetch in {delay:.1f}s (attempt {attempt+1}/{max_retries})...")
+                await asyncio.sleep(delay)
+                attempt += 1
+        logger.log_error(f"Max retries reached for CoinGecko data fetch for {coin_id}")
+        return None
     
     async def fetch_multiple_timeframes(
         self, 

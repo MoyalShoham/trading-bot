@@ -14,6 +14,20 @@ from config import config
 from logger import logger
 
 class TelegramNotifier:
+    async def close(self):
+        """Close the aiohttp session if open."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+    def escape_markdown(self, text: str) -> str:
+        """Escape Telegram MarkdownV2 special characters in text."""
+        import re
+        if not isinstance(text, str):
+            text = str(text)
+        return re.sub(r'([_\*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
+    async def initialize(self):
+        """Ensure aiohttp session is initialized."""
+        if not self.session or self.session.closed:
+            self.session = aiohttp.ClientSession()
     """Telegram bot notifier for trading alerts."""
     
     def __init__(self):
@@ -139,11 +153,11 @@ class TelegramNotifier:
         if not self.session:
             logger.log_error("Session not initialized")
             return False
-        
         if not self.bot_token or not self.chat_id:
             logger.log_error("Telegram credentials not configured")
             return False
-        
+        # Escape all dynamic content for Markdown
+        text = self.escape_markdown(text)
         url = f"{self.base_url}/sendMessage"
         data = {
             'chat_id': self.chat_id,
@@ -151,7 +165,6 @@ class TelegramNotifier:
             'parse_mode': parse_mode,
             'disable_web_page_preview': True
         }
-        
         try:
             async with self.session.post(url, json=data) as response:
                 if response.status == 200:
@@ -166,7 +179,6 @@ class TelegramNotifier:
                     error_text = await response.text()
                     logger.log_error(f"Telegram HTTP error {response.status}: {error_text}")
                     return False
-                    
         except Exception as e:
             logger.log_error(f"Error sending Telegram message: {str(e)}")
             return False

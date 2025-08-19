@@ -18,6 +18,10 @@ from config import config
 from logger import logger
 
 class BinanceTrader:
+    async def initialize(self):
+        """Ensure aiohttp session is initialized."""
+        if not self.session or self.session.closed:
+            self.session = aiohttp.ClientSession()
     """Binance Futures trading interface with risk management."""
     
     def __init__(self):
