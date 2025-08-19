@@ -16,6 +16,7 @@ import json
 
 from config import config
 from logger import logger
+from symbol_precision import round_quantity
 
 class BinanceTrader:
     async def initialize(self):
@@ -176,7 +177,7 @@ class BinanceTrader:
                             'side': 'long' if float(position['positionAmt']) > 0 else 'short',
                             'size': abs(float(position['positionAmt'])),
                             'entry_price': float(position['entryPrice']),
-                            'unrealized_pnl': float(position['unRealizedProfit']),
+                            'unrealized_pnl': float(position.get('unRealizedProfit', 0.0)),
                             'leverage': int(position['leverage'])
                         }
                 
@@ -304,6 +305,9 @@ class BinanceTrader:
             # Set leverage first
             await self.set_leverage(symbol, self.max_leverage)
             
+            # Round quantity to allowed precision
+            quantity = round_quantity(symbol, quantity)
+
             # Prepare order parameters
             params = {
                 'symbol': symbol,

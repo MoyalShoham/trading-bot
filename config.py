@@ -28,7 +28,7 @@ class Config:
     
     # === TRADING CONFIGURATION ===
     MAX_LEVERAGE: int = int(os.getenv('MAX_LEVERAGE', '3'))
-    RISK_PER_TRADE: float = float(os.getenv('RISK_PER_TRADE', '0.02'))
+    RISK_PER_TRADE: float = float(os.getenv('RISK_PER_TRADE', '0.1'))
     STOP_LOSS_PERCENT: float = float(os.getenv('STOP_LOSS_PERCENT', '0.05'))
     TAKE_PROFIT_PERCENT: float = float(os.getenv('TAKE_PROFIT_PERCENT', '0.10'))
     
@@ -55,7 +55,7 @@ class Config:
     RETRY_DELAY: float = 1.0
     
     # === RISK MANAGEMENT ===
-    MAX_POSITION_SIZE: float = 0.1  # Max 10% of balance per position
+    MAX_POSITION_SIZE: float = 0.2  # Max 10% of balance per position
     MIN_BALANCE_THRESHOLD: float = 0.05  # Stop trading if balance drops below 5%
     
     # === PERFORMANCE OPTIMIZATION ===
