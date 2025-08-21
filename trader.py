@@ -77,6 +77,7 @@ class BinanceTrader:
                 order_side = 'BUY'
             elif side == 'short':
                 stop_loss_price = entry_price * (1 + self.stop_loss_percent)
+                take_profit_price = entry_price * (1 - self.take_profit_percent)
                 quantity = round_quantity(symbol, quantity)
                 order_side = 'SELL'
             else:

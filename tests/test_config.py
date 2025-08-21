@@ -18,9 +18,8 @@ class TestConfig:
     
     def test_symbols(self):
         """Test trading symbols configuration."""
-        assert 'ETHUSDT' in config.SYMBOLS
-        assert 'SOLUSDT' in config.SYMBOLS
-        assert len(config.SYMBOLS) == 2
+        assert 'LINKUSDT' in config.SYMBOLS
+        assert len(config.SYMBOLS) == 1
     
     def test_timeframes(self):
         """Test timeframe configuration."""
