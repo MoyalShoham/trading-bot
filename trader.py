@@ -4,7 +4,6 @@ Connects to Binance Futures API for placing/canceling/monitoring orders.
 Always checks balance, margin, and open positions.
 Implements risk management: stop-loss, take-profit, max leverage.
 """
-
 import asyncio
 import aiohttp
 import hmac
@@ -14,25 +13,61 @@ from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 import json
 
+
 from config import config
 from logger import logger
-from symbol_precision import round_quantity, SYMBOL_PRECISION
 
-def round_price(symbol: str, price: float) -> float:
-    precision = SYMBOL_PRECISION.get(symbol, 2)
-    return float(f"{price:.{precision}f}")
+from symbol_precision import round_quantity, round_price, SYMBOL_PRECISION
 
 class BinanceTrader:
+    async def set_leverage(self, symbol: str, leverage: int) -> bool:
+        """Set leverage for a given symbol on Binance Futures."""
+        try:
+            params = {
+                'symbol': symbol,
+                'leverage': leverage
+            }
+            response = await self._make_request('POST', '/fapi/v1/leverage', params, signed=True)
+            if response and response.get('leverage') == leverage:
+                logger.log_info(f"Leverage set to {leverage}x for {symbol}")
+                return True
+            else:
+                logger.log_warning(f"Failed to set leverage for {symbol}")
+                return False
+        except Exception as e:
+            logger.log_error(f"Error setting leverage for {symbol}: {str(e)}")
+            return False
+    async def get_symbol_price(self, symbol: str) -> Optional[float]:
+        """Fetch the latest price for a given symbol from Binance Futures."""
+        try:
+            params = {'symbol': symbol}
+            response = await self._make_request('GET', '/fapi/v1/ticker/price', params, signed=False)
+            if response and 'price' in response:
+                return float(response['price'])
+            else:
+                logger.log_warning(f"Could not fetch price for {symbol}")
+                return None
+        except Exception as e:
+            logger.log_error(f"Error fetching symbol price for {symbol}: {str(e)}")
+            return None
 
     async def set_sltp_for_existing_positions(self):
         """
         Set Stop Loss and Take Profit orders for all existing open positions.
-        Logs success/failure for each SL/TP placement and prints all open orders after.
+        Cancels ALL open SL/TP orders for each symbol before placing new ones.
         """
         for symbol, position in self.positions.items():
             side = position.get('side')
             entry_price = position.get('entry_price')
             quantity = position.get('quantity', position.get('size', 0))
+            # Cancel ALL open SL/TP orders for this symbol from Binance
+            try:
+                open_orders = await self.get_open_orders(symbol)
+                for order in open_orders:
+                    if order['type'] in ['STOP_MARKET', 'TAKE_PROFIT_MARKET']:
+                        await self.cancel_order(symbol, order['orderId'])
+            except Exception as e:
+                logger.log_error(f"Error cancelling open SL/TP orders for {symbol}: {e}")
             if not side or not entry_price or not quantity:
                 logger.log_warning(f"Missing data for position {symbol}, skipping SLTP set.")
                 continue
@@ -42,7 +77,7 @@ class BinanceTrader:
                 order_side = 'BUY'
             elif side == 'short':
                 stop_loss_price = entry_price * (1 + self.stop_loss_percent)
-                take_profit_price = entry_price * (1 - self.take_profit_percent)
+                quantity = round_quantity(symbol, quantity)
                 order_side = 'SELL'
             else:
                 logger.log_warning(f"Unknown side for position {symbol}, skipping SLTP set.")
@@ -53,24 +88,25 @@ class BinanceTrader:
             take_profit_price = round_price(symbol, take_profit_price)
             # Place stop loss and take profit orders with error handling
             try:
-                await self._place_stop_loss(symbol, order_side, quantity, stop_loss_price)
+                sl_order_id = await self._place_stop_loss(symbol, order_side, quantity, stop_loss_price)
+                if sl_order_id:
+                    position['sl_order_id'] = sl_order_id
                 logger.log_info(f"SL set for {symbol} at {stop_loss_price}")
             except Exception as e:
                 logger.log_error(f"Failed to set SL for {symbol}: {e}")
             try:
-                await self._place_take_profit(symbol, order_side, quantity, take_profit_price)
+                tp_order_id = await self._place_take_profit(symbol, order_side, quantity, take_profit_price)
+                if tp_order_id:
+                    position['tp_order_id'] = tp_order_id
                 logger.log_info(f"TP set for {symbol} at {take_profit_price}")
             except Exception as e:
                 logger.log_error(f"Failed to set TP for {symbol}: {e}")
         # After all, log all open orders for all symbols
-        try:
-            open_orders = await self.get_open_orders()
-            if open_orders:
-                logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}")
-            else:
-                logger.log_info("No open orders after SLTP set.")
-        except Exception as e:
-            logger.log_error(f"Error fetching open orders after SLTP set: {e}")
+        open_orders = await self.get_open_orders()
+        if open_orders:
+            logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}")
+        else:
+            logger.log_info("No open orders after SLTP set.")
     async def initialize(self):
         """Ensure aiohttp session is initialized."""
         if not self.session or self.session.closed:
@@ -114,7 +150,7 @@ class BinanceTrader:
         
         Args:
             params: Query parameters string
-            
+            quantity = round_quantity(symbol, raw_quantity)
         Returns:
             HMAC signature
         """
@@ -210,7 +246,7 @@ class BinanceTrader:
             return None
     
     async def get_account_info(self) -> Optional[Dict]:
-        """Get account information including balances and positions."""
+        """Get account information including balances and positions. Also attaches SL/TP order IDs to each position if found."""
         try:
             response = await self._make_request('GET', '/fapi/v2/account', signed=True)
             if response:
@@ -219,61 +255,38 @@ class BinanceTrader:
                     if asset['asset'] == 'USDT':
                         self.balance = float(asset['walletBalance'])
                         break
-                
                 # Update positions
                 self.positions = {}
                 for position in response.get('positions', []):
                     if float(position['positionAmt']) != 0:
-                        self.positions[position['symbol']] = {
-                            'symbol': position['symbol'],
+                        size = abs(float(position['positionAmt']))
+                        symbol = position['symbol']
+                        pos_dict = {
+                            'symbol': symbol,
                             'side': 'long' if float(position['positionAmt']) > 0 else 'short',
-                            'size': abs(float(position['positionAmt'])),
+                            'size': size,
+                            'quantity': size,  # Ensure compatibility with rest of code
                             'entry_price': float(position['entryPrice']),
                             'unrealized_pnl': float(position.get('unRealizedProfit', 0.0)),
                             'leverage': int(position['leverage'])
                         }
-                
+                        # Fetch open orders for this symbol and attach SL/TP order IDs if found
+                        try:
+                            open_orders = await self.get_open_orders(symbol)
+                            for order in open_orders:
+                                if order['type'] == 'STOP_MARKET':
+                                    pos_dict['sl_order_id'] = order['orderId']
+                                elif order['type'] == 'TAKE_PROFIT_MARKET':
+                                    pos_dict['tp_order_id'] = order['orderId']
+                        except Exception as e:
+                            logger.log_warning(f"Could not fetch open orders for {symbol} to attach SL/TP: {e}")
+                        self.positions[symbol] = pos_dict
                 logger.log_info(f"Account info updated: Balance=${self.balance:.2f}, Positions={len(self.positions)}")
                 return response
             return None
-            
         except Exception as e:
             logger.log_error(f"Error getting account info: {str(e)}")
             return None
-    
-    async def get_symbol_price(self, symbol: str) -> Optional[float]:
-        """Get current price for a symbol."""
-        try:
-            response = await self._make_request('GET', '/fapi/v1/ticker/price', {'symbol': symbol})
-            if response:
-                return float(response['price'])
-            return None
-            
-        except Exception as e:
-            logger.log_error(f"Error getting price for {symbol}: {str(e)}")
-            return None
-    
-    async def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """Set leverage for a symbol."""
-        if leverage > self.max_leverage:
-            logger.log_warning(f"Leverage {leverage} exceeds maximum {self.max_leverage}")
-            leverage = self.max_leverage
-        
-        try:
-            params = {
-                'symbol': symbol,
-                'leverage': leverage
-            }
-            response = await self._make_request('POST', '/fapi/v1/leverage', params, signed=True)
-            
-            if response:
-                logger.log_info(f"Leverage set to {leverage} for {symbol}")
-                return True
-            return False
-            
-        except Exception as e:
-            logger.log_error(f"Error setting leverage for {symbol}: {str(e)}")
-            return False
     
     def calculate_position_size(self, symbol: str, entry_price: float, stop_loss_price: float) -> float:
         """
@@ -411,7 +424,7 @@ class BinanceTrader:
             return None
     
     async def _place_stop_loss(self, symbol: str, side: str, quantity: float, stop_loss_price: float):
-        """Place stop loss order."""
+        """Place stop loss order. Returns orderId if successful."""
         try:
             stop_side = 'SELL' if side == 'BUY' else 'BUY'
             quantity = round_quantity(symbol, quantity)
@@ -422,16 +435,19 @@ class BinanceTrader:
                 'type': 'STOP_MARKET',
                 'quantity': quantity,
                 'stopPrice': stop_loss_price,
-                'reduceOnly': True
+                'closePosition': True
             }
             response = await self._make_request('POST', '/fapi/v1/order', stop_params, signed=True)
             if response:
                 logger.log_info(f"Stop loss placed at {stop_loss_price} for {symbol}")
+                return response.get('orderId')
+            return None
         except Exception as e:
             logger.log_error(f"Error placing stop loss: {str(e)}")
+            return None
     
     async def _place_take_profit(self, symbol: str, side: str, quantity: float, take_profit_price: float):
-        """Place take profit order."""
+        """Place take profit order. Returns orderId if successful."""
         try:
             tp_side = 'SELL' if side == 'BUY' else 'BUY'
             quantity = round_quantity(symbol, quantity)
@@ -442,13 +458,16 @@ class BinanceTrader:
                 'type': 'TAKE_PROFIT_MARKET',
                 'quantity': quantity,
                 'stopPrice': take_profit_price,
-                'reduceOnly': True
+                'closePosition': True
             }
             response = await self._make_request('POST', '/fapi/v1/order', tp_params, signed=True)
             if response:
                 logger.log_info(f"Take profit placed at {take_profit_price} for {symbol}")
+                return response.get('orderId')
+            return None
         except Exception as e:
             logger.log_error(f"Error placing take profit: {str(e)}")
+            return None
     
     async def cancel_order(self, symbol: str, order_id: str) -> bool:
         """Cancel an order."""
@@ -487,22 +506,27 @@ class BinanceTrader:
             return []
     
     async def close_position(self, symbol: str, side: str, quantity: float) -> bool:
-        """Close an existing position."""
+        """Close an existing position and cancel TP/SL orders."""
         try:
+            # Cancel TP/SL orders if tracked
+            position = self.positions.get(symbol)
+            if position:
+                for oid_key in ['sl_order_id', 'tp_order_id']:
+                    order_id = position.get(oid_key)
+                    if order_id:
+                        await self.cancel_order(symbol, order_id)
+                        position[oid_key] = None
             close_side = 'SELL' if side == 'BUY' else 'BUY'
-            
             response = await self.place_order(
                 symbol=symbol,
                 side=close_side,
                 order_type='MARKET',
                 quantity=quantity
             )
-            
             if response:
                 logger.log_info(f"Position closed for {symbol}: {quantity} {side}")
                 return True
             return False
-            
         except Exception as e:
             logger.log_error(f"Error closing position: {str(e)}")
             return False
@@ -516,24 +540,26 @@ class BinanceTrader:
             'overall_ok': True
         }
         try:
-            # Check balance threshold
-            if self.balance < (self.balance * self.min_balance_threshold):
+            # Check balance threshold (compare to min_balance_threshold * starting balance if available)
+            min_balance = getattr(self, 'starting_balance', 0) * self.min_balance_threshold if hasattr(self, 'starting_balance') else 0
+            if min_balance > 0 and self.balance < min_balance:
                 risk_status['balance_ok'] = False
                 risk_status['overall_ok'] = False
-            # Check leverage and position size for each position
+
+            # Check leverage and position size for each currently open position only
             for symbol, position in self.positions.items():
-                # Use .get for leverage, fallback to self.max_leverage if missing
                 leverage = position.get('leverage', self.max_leverage)
                 if leverage > self.max_leverage:
                     risk_status['leverage_ok'] = False
                     risk_status['overall_ok'] = False
-                # Use .get for size/entry_price for compatibility
                 size = position.get('size')
                 if size is None:
                     size = position.get('quantity', 0)
                 entry_price = position.get('entry_price', 0)
                 position_value = size * entry_price
-                if position_value > (self.balance * self.max_position_size):
+                max_allowed = self.balance * self.max_position_size
+                if position_value > max_allowed:
+                    logger.log_warning(f"Position size for {symbol} exceeds max allowed: {position_value:.2f} > {max_allowed:.2f}")
                     risk_status['position_size_ok'] = False
                     risk_status['overall_ok'] = False
             return risk_status
@@ -547,6 +573,9 @@ class BinanceTrader:
         Execute a trading signal with real PnL and balance tracking.
         """
         try:
+            # Always refresh account info before risk checks to sync with Binance
+            await self.get_account_info()
+
             if not signal or signal.get('signal') == 'no-trade':
                 logger.log_info("No trading signal to execute")
                 return None
@@ -581,8 +610,9 @@ class BinanceTrader:
                 stop_loss_price = current_price * (1 + self.stop_loss_percent)
                 take_profit_price = current_price * (1 - self.take_profit_percent)
 
-            # Calculate quantity
-            quantity = self.calculate_position_size(symbol, current_price, stop_loss_price)
+            # Calculate and round quantity
+            raw_quantity = self.calculate_position_size(symbol, current_price, stop_loss_price)
+            quantity = round_quantity(symbol, raw_quantity)
             if quantity <= 0:
                 logger.log_error(f"Invalid position size calculated: {quantity}")
                 return None
@@ -596,7 +626,7 @@ class BinanceTrader:
             if prev_position:
                 prev_side = prev_position['side']
                 prev_entry = prev_position['entry_price']
-                prev_qty = prev_position['quantity']
+                prev_qty = round_quantity(symbol, prev_position['quantity'])
                 if (side == 'BUY' and prev_side == 'short') or (side == 'SELL' and prev_side == 'long'):
                     closing_trade = True
                     # Calculate PnL
@@ -608,6 +638,11 @@ class BinanceTrader:
                     logger.log_info(f"Closed {prev_side} position for {symbol} at {current_price}, PnL: {realized_pnl:.4f}, New balance: {self.balance:.4f}")
                     # Remove position after closing
                     self.positions.pop(symbol)
+                    # Reset/check risk limits after closing
+                    risk_status = self.check_risk_limits()
+                    if not risk_status['overall_ok']:
+                        logger.log_warning(f"Risk limits exceeded for {symbol} after closing position")
+                        return None
 
             # Place the order (always pass SLTP)
             order_result = await self.place_order(
@@ -625,7 +660,9 @@ class BinanceTrader:
                     self.positions[symbol] = {
                         'side': 'long' if side == 'BUY' else 'short',
                         'entry_price': current_price,
-                        'quantity': quantity
+                        'quantity': quantity,
+                        'sl_order_id': None,
+                        'tp_order_id': None
                     }
 
                 trade_data = {
@@ -639,8 +676,9 @@ class BinanceTrader:
                     'balance': self.balance
                 }
                 logger.log_trade(trade_data)
-                # Always set SLTP for all open positions after any position update
-                await self.set_sltp_for_existing_positions()
+                # Only set SLTP if there is still an open position for this symbol
+                if symbol in self.positions:
+                    await self.set_sltp_for_existing_positions()
                 return {
                     'success': True,
                     'order': order_result,

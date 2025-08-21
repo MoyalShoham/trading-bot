@@ -19,9 +19,9 @@ from data.binance_provider import BinanceProvider
 class DataFetcher:
     """Fetches market data using the selected provider."""
     def __init__(self):
-        self.provider_name = getattr(config, "PROVIDER", "BINANCE").upper()
+        self.provider_name = getattr(config, "PROVIDER", "BinanceProvider").upper()
         self.provider = None
-        if self.provider_name == "BINANCE":
+        if self.provider_name == "BINANCEPROVIDER":
             self.provider = BinanceProvider(
                 cache_ttl_prices=int(getattr(config, "CACHE_TTL_PRICES", 5)),
                 cache_ttl_klines=int(getattr(config, "CACHE_TTL_KLINES", 60))

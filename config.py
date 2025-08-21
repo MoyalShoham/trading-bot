@@ -12,7 +12,7 @@ load_dotenv()
 
 class Config:
     # === DATA PROVIDER ===
-    PROVIDER: str = os.getenv('PROVIDER', 'BINANCE')
+    PROVIDER: str = os.getenv('PROVIDER', 'BinanceProvider')
     CACHE_TTL_PRICES: int = int(os.getenv('CACHE_TTL_PRICES', '5'))
     CACHE_TTL_KLINES: int = int(os.getenv('CACHE_TTL_KLINES', '60'))
     """Configuration class containing all bot settings."""
@@ -24,7 +24,7 @@ class Config:
     
     # === OPENAI API ===
     OPENAI_API_KEY: str = os.getenv('OPENAI_API_KEY', '')
-    OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-4')
+    OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
     
     # === TELEGRAM BOT ===
     TELEGRAM_BOT_TOKEN: str = os.getenv('TELEGRAM_BOT_TOKEN', '')
@@ -33,7 +33,7 @@ class Config:
     # === TRADING CONFIGURATION ===
     MAX_LEVERAGE: int = int(os.getenv('MAX_LEVERAGE', '5'))
     RISK_PER_TRADE: float = float(os.getenv('RISK_PER_TRADE', '0.01'))
-    STOP_LOSS_PERCENT: float = float(os.getenv('STOP_LOSS_PERCENT', '0.01'))
+    STOP_LOSS_PERCENT: float = float(os.getenv('STOP_LOSS_PERCENT', '0.005'))
     TAKE_PROFIT_PERCENT: float = float(os.getenv('TAKE_PROFIT_PERCENT', '0.05'))
     
     # === DRY RUN MODE ===
@@ -59,8 +59,8 @@ class Config:
     RETRY_DELAY: float = 1.0
     
     # === RISK MANAGEMENT ===
-    MAX_POSITION_SIZE: float = 0.1  # Max 10% of balance per position
-    MIN_BALANCE_THRESHOLD: float = 0.005  # Stop trading if balance drops below 0.5%
+    MAX_POSITION_SIZE: float =  4.5  # Max 50% of balance per position
+    MIN_BALANCE_THRESHOLD: float = 0.05  # Stop trading if balance drops below 5%
     
     # === PERFORMANCE OPTIMIZATION ===
     BATCH_FETCH_SIZE: int = int(os.getenv('BATCH_FETCH_SIZE', '10'))
@@ -75,7 +75,7 @@ class Config:
     MAX_CACHE_SIZE: int = int(os.getenv('MAX_CACHE_SIZE', '1000'))
     CACHE_CLEANUP_INTERVAL: int = int(os.getenv('CACHE_CLEANUP_INTERVAL', '300'))  # 5 minutes
 
-    EXECUTION_INTERVAL: int = int(os.getenv('EXECUTION_INTERVAL', '60'))  # seconds between bot cycles
+    EXECUTION_INTERVAL: int = int(os.getenv('EXECUTION_INTERVAL', '15'))  # seconds between bot cycles
     CONFIRMATION_INTERVAL: int = int(os.getenv('CONFIRMATION_INTERVAL', '300'))  # seconds between advisor confirmations
     
     @classmethod

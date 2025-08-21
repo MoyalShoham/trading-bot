@@ -311,6 +311,11 @@ class TradingBot:
                 logger.log_info("No trading signals generated")
                 return
             executions = await self.execute_signals(signals)
+            # Always set SLTP for all open positions after every cycle
+            try:
+                await trader.set_sltp_for_existing_positions()
+            except Exception as sltp_e:
+                logger.log_error(f"Error setting SLTP for open positions: {str(sltp_e)}")
             logger.log_info(f"Execution cycle completed: {len(signals)} signals, {len(executions)} executions")
         except Exception as e:
             logger.log_error(f"Error in execution cycle: {str(e)}")
