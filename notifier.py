@@ -14,6 +14,45 @@ from config import config
 from logger import logger
 
 class TelegramNotifier:
+    def __init__(self):
+        self.session = None
+        self.bot_token = config.TELEGRAM_BOT_TOKEN
+        self.chat_id = config.TELEGRAM_CHAT_ID
+        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+        self.templates = {
+            'signal': (
+                "<b>Signal</b> <code>{symbol}</code> | <b>{signal}</b> | Confidence: <code>{confidence:.2f}</code> | Risk: <code>{risk_level}</code>\n"
+                "Reason: <code>{reason}</code>\n"
+                "Indicators: <code>{indicator_summary}</code>\n"
+                "Regime: <code>{regime}</code> | Factors: <code>{factors}</code>\n"
+                "Leverage: <code>{leverage}x</code>\n"
+                "Time: <code>{timestamp}</code>"
+            ),
+            'trade': (
+                "<b>Trade</b> <code>{symbol}</code> | <b>{side}</b> | Qty: <code>{quantity}</code> | Price: <code>{price:.{price_precision}f}</code> | Leverage: <code>{leverage}x</code>\n"
+                "Order ID: <code>{order_id}</code> | Status: <code>{status}</code>\n"
+                "Balance: <code>${balance:,.2f}</code> | PnL: <code>${pnl:,.2f}</code>\n"
+                "Time: <code>{timestamp}</code>"
+            ),
+            'regime': (
+                "<b>Regime Change</b> <code>{symbol}</code> | <b>{regime}</b> | Confidence: <code>{confidence:.2f}</code>\n"
+                "Factors: <code>{factors}</code>\n"
+                "Note: <code>{note}</code>\n"
+                "Time: <code>{timestamp}</code>"
+            ),
+            'error': (
+                "<b>Error</b> <code>{error_type}</code>\n"
+                "Message: <code>{message}</code>\n"
+                "Details: <code>{details}</code>\n"
+                "Time: <code>{timestamp}</code>"
+            ),
+            'info': (
+                "<b>Info</b>\n"
+                "Message: <code>{message}</code>\n"
+                "Details: <code>{details}</code>\n"
+                "Time: <code>{timestamp}</code>"
+            ),
+        }
     async def close(self):
         """Close the aiohttp session if open."""
         if self.session and not self.session.closed:
@@ -28,72 +67,52 @@ class TelegramNotifier:
         """Ensure aiohttp session is initialized."""
         if not self.session or self.session.closed:
             self.session = aiohttp.ClientSession()
-    """Telegram bot notifier for trading alerts."""
-    
-    def __init__(self):
-        """Initialize the Telegram notifier."""
-        self.bot_token = config.TELEGRAM_BOT_TOKEN
-        self.chat_id = config.TELEGRAM_CHAT_ID
-        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
-        self.session: Optional[aiohttp.ClientSession] = None
-        
-        # Message templates
-        self.templates = {
-            'signal': self._get_signal_template(),
-            'trade': self._get_trade_template(),
-            'regime': self._get_regime_template(),
-            'error': self._get_error_template(),
-            'info': self._get_info_template()
-        }
-    
-    async def __aenter__(self):
-        """Async context manager entry."""
-        self.session = aiohttp.ClientSession()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        if self.session:
-            await self.session.close()
-    
-    def _get_signal_template(self) -> str:
-        """Get signal message template."""
-        return """
-🚨 *TRADING SIGNAL* 🚨
 
-*Symbol:* {symbol}
-*Signal:* {signal}
-*Confidence:* {confidence:.1%}
-*Risk Level:* {risk_level}
+    async def handle_command(self, command: str) -> bool:
+        """
+        Handle Telegram bot commands: /portfolio, /status, /positions, /closeAllActivePositions
+        """
+        from trader import trader
+        command = command.strip().lower()
+        if command == '/portfolio':
+            balance = getattr(trader, 'balance', 0.0)
+            msg = f"\U0001F4B0 <b>Portfolio</b>\n<b>Balance:</b> <code>${balance:,.2f}</code>"
+            return await self._send_message(msg, parse_mode='HTML')
+        if command == '/status':
+            # Show bot status (basic info)
+            total_signals = getattr(trader, 'total_signals', 0)
+            total_trades = getattr(trader, 'total_trades', 0)
+            total_pnl = getattr(trader, 'total_pnl', 0.0)
+            msg = f"\U0001F4CA <b>Status</b>\nSignals: <code>{total_signals}</code>\nTrades: <code>{total_trades}</code>\nPnL: <code>${total_pnl:,.2f}</code>"
+            return await self._send_message(msg, parse_mode='HTML')
+        if command == '/positions':
+            positions = getattr(trader, 'positions', {})
+            if not positions:
+                msg = "\U0001F4CB <b>Positions</b>\nNo open positions."
+            else:
+                lines = ["\U0001F4CB <b>Open Positions</b>"]
+                for sym, pos in positions.items():
+                    side = pos.get('side', 'N/A')
+                    qty = pos.get('quantity', pos.get('size', 0))
+                    entry = pos.get('entry_price', 0)
+                    lev = pos.get('leverage', getattr(trader, 'max_leverage', 1))
+                    lines.append(f"<code>{sym}</code> | <b>{side}</b> | Qty: <code>{qty}</code> | Entry: <code>${entry}</code> | Lev: <code>{lev}x</code>")
+                msg = '\n'.join(lines)
+            return await self._send_message(msg, parse_mode='HTML')
+        if command == '/closeallactivepositions':
+            positions = getattr(trader, 'positions', {})
+            closed = 0
+            for sym, pos in list(positions.items()):
+                side = pos.get('side', 'N/A')
+                qty = pos.get('quantity', pos.get('size', 0))
+                if qty > 0:
+                    await trader.close_position(sym, side, qty)
+                    closed += 1
+            msg = f"\U00002705 <b>Closed {closed} active positions.</b>"
+            return await self._send_message(msg, parse_mode='HTML')
+        msg = "\U00002753 <b>Unknown command.</b> Available: /portfolio, /status, /positions, /closeAllActivePositions"
+        return await self._send_message(msg, parse_mode='HTML')
 
-*Reason:* {reason}
-
-*Indicators:*
-{indicator_summary}
-
-*Advisor Regime:* {regime}
-*Factors:* {factors}
-
-*Time:* {timestamp}
-"""
-    
-    def _get_trade_template(self) -> str:
-        """Get trade execution template."""
-        return """
-💰 *TRADE EXECUTED* 💰
-
-*Symbol:* {symbol}
-*Side:* {side}
-*Quantity:* {quantity}
-*Price:* ${price:,.2f}
-*Order ID:* {order_id}
-*Status:* {status}
-
-*Balance:* ${balance:,.2f}
-*PnL:* ${pnl:,.2f}
-
-*Time:* {timestamp}
-"""
     
     def _get_regime_template(self) -> str:
         """Get regime change template."""
@@ -139,13 +158,13 @@ class TelegramNotifier:
 *Time:* {timestamp}
 """
     
-    async def _send_message(self, text: str, parse_mode: str = 'Markdown') -> bool:
+    async def _send_message(self, text: str, parse_mode: str = 'HTML') -> bool:
         """
         Send a message to Telegram.
         
         Args:
             text: Message text
-            parse_mode: Parse mode (Markdown, HTML, etc.)
+            parse_mode: Parse mode (HTML only)
             
         Returns:
             True if successful, False otherwise
@@ -156,8 +175,6 @@ class TelegramNotifier:
         if not self.bot_token or not self.chat_id:
             logger.log_error("Telegram credentials not configured")
             return False
-        # Escape all dynamic content for Markdown
-        text = self.escape_markdown(text)
         url = f"{self.base_url}/sendMessage"
         data = {
             'chat_id': self.chat_id,
@@ -220,7 +237,7 @@ class TelegramNotifier:
         
         return '\n'.join([f"• {factor}" for factor in factors])
     
-    async def notify_signal(self, signal: Dict[str, Any]) -> bool:
+    async def notify_signal(self, signal: Dict[str, Any], leverage: int = None) -> bool:
         """
         Send trading signal notification.
         
@@ -241,18 +258,22 @@ class TelegramNotifier:
             confidence = signal.get('confidence', 0.0)
             risk_level = signal.get('risk_level', 'unknown')
             reason = signal.get('reason', 'No reason provided')
-            
             # Get indicator summary
             indicator_analysis = signal.get('indicator_analysis', {})
             indicator_summary = self._format_indicator_summary(indicator_analysis)
-            
             # Get advisor data
             advisor_regime = signal.get('advisor_regime', {})
             regime = advisor_regime.get('regime', 'unknown')
             factors = self._format_factors(advisor_regime.get('factors', []))
-            
             timestamp = signal.get('timestamp', datetime.now().isoformat())
-            
+            # Leverage
+            if leverage is None:
+                from trader import trader
+                trader_positions = getattr(trader, 'positions', {})
+                lev = None
+                if symbol in trader_positions:
+                    lev = trader_positions[symbol].get('leverage', None)
+                leverage = lev if lev is not None else getattr(trader, 'max_leverage', 1)
             # Format message
             message = self.templates['signal'].format(
                 symbol=symbol,
@@ -263,11 +284,11 @@ class TelegramNotifier:
                 indicator_summary=indicator_summary,
                 regime=regime.upper(),
                 factors=factors,
+                leverage=leverage,
                 timestamp=timestamp
             )
-            
             # Send message
-            return await self._send_message(message)
+            return await self._send_message(message, parse_mode='HTML')
             
         except Exception as e:
             logger.log_error(f"Error sending signal notification: {str(e)}")
@@ -283,41 +304,45 @@ class TelegramNotifier:
         Returns:
             True if notification sent successfully
         """
-        try:
-            if not trade_data:
-                logger.log_warning("No trade data provided for notification")
-                return False
-            
-            # Extract data
-            symbol = trade_data.get('symbol', 'UNKNOWN')
-            side = trade_data.get('side', 'UNKNOWN')
-            quantity = trade_data.get('quantity', 0)
-            price = trade_data.get('price', 0)
-            order_id = trade_data.get('order_id', 'UNKNOWN')
-            status = trade_data.get('status', 'UNKNOWN')
-            balance = trade_data.get('balance', 0)
-            pnl = trade_data.get('pnl', 0)
-            timestamp = trade_data.get('timestamp', datetime.now().isoformat())
-            
-            # Format message
-            message = self.templates['trade'].format(
-                symbol=symbol,
-                side=side.upper(),
-                quantity=quantity,
-                price=price,
-                order_id=order_id,
-                status=status,
-                balance=balance,
-                pnl=pnl,
-                timestamp=timestamp
-            )
-            
-            # Send message
-            return await self._send_message(message)
-            
-        except Exception as e:
-            logger.log_error(f"Error sending trade notification: {str(e)}")
+        if not trade_data:
+            logger.log_warning("No trade data provided for notification")
             return False
+        # Extract data
+        symbol = trade_data.get('symbol', 'UNKNOWN')
+        side = trade_data.get('side', 'UNKNOWN')
+        quantity = trade_data.get('quantity', 0)
+        price = trade_data.get('price', 0)
+        order_id = trade_data.get('order_id', 'UNKNOWN')
+        status = trade_data.get('status', 'UNKNOWN')
+        balance = trade_data.get('balance', 0)
+        pnl = trade_data.get('pnl', 0)
+        timestamp = trade_data.get('timestamp', datetime.now().isoformat())
+        # Leverage
+        from trader import trader
+        trader_positions = getattr(trader, 'positions', {})
+        lev = None
+        if symbol in trader_positions:
+            lev = trader_positions[symbol].get('leverage', None)
+        leverage = lev if lev is not None else getattr(trader, 'max_leverage', 1)
+        # Price precision
+        from symbol_precision import SYMBOL_PRECISION
+        price_precision = SYMBOL_PRECISION.get(symbol, 2)
+        # Format message
+        message = self.templates['trade'].format(
+            symbol=symbol,
+            side=side.upper(),
+            quantity=quantity,
+            price=price,
+            price_precision=price_precision,
+            order_id=order_id,
+            status=status,
+            balance=balance,
+            pnl=pnl,
+            leverage=leverage,
+            timestamp=timestamp
+        )
+        # Send message
+        return await self._send_message(message, parse_mode='HTML')
     
     async def notify_regime_change(self, regime_data: Dict[str, Any]) -> bool:
         """
