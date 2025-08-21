@@ -54,20 +54,12 @@ class BinanceTrader:
     async def set_sltp_for_existing_positions(self):
         """
         Set Stop Loss and Take Profit orders for all existing open positions.
-        Cancels ALL open SL/TP orders for each symbol before placing new ones.
+        Only cancels old SL/TP orders after successfully creating new ones.
         """
         for symbol, position in self.positions.items():
             side = position.get('side')
             entry_price = position.get('entry_price')
             quantity = position.get('quantity', position.get('size', 0))
-            # Cancel ALL open SL/TP orders for this symbol from Binance
-            try:
-                open_orders = await self.get_open_orders(symbol)
-                for order in open_orders:
-                    if order['type'] in ['STOP_MARKET', 'TAKE_PROFIT_MARKET']:
-                        await self.cancel_order(symbol, order['orderId'])
-            except Exception as e:
-                logger.log_error(f"Error cancelling open SL/TP orders for {symbol}: {e}")
             if not side or not entry_price or not quantity:
                 logger.log_warning(f"Missing data for position {symbol}, skipping SLTP set.")
                 continue
@@ -88,12 +80,17 @@ class BinanceTrader:
             stop_loss_price = round_price(symbol, stop_loss_price)
             take_profit_price = round_price(symbol, take_profit_price)
             # Place stop loss and take profit orders with error handling
+            sl_order_id = None
+            tp_order_id = None
+            sl_error = None
+            tp_error = None
             try:
                 sl_order_id = await self._place_stop_loss(symbol, order_side, quantity, stop_loss_price)
                 if sl_order_id:
                     position['sl_order_id'] = sl_order_id
                 logger.log_info(f"SL set for {symbol} at {stop_loss_price}")
             except Exception as e:
+                sl_error = e
                 logger.log_error(f"Failed to set SL for {symbol}: {e}")
             try:
                 tp_order_id = await self._place_take_profit(symbol, order_side, quantity, take_profit_price)
@@ -101,7 +98,20 @@ class BinanceTrader:
                     position['tp_order_id'] = tp_order_id
                 logger.log_info(f"TP set for {symbol} at {take_profit_price}")
             except Exception as e:
+                tp_error = e
                 logger.log_error(f"Failed to set TP for {symbol}: {e}")
+            # Only if both SL and TP were set (or at least attempted), then cancel old ones
+            if (sl_order_id or sl_error) and (tp_order_id or tp_error):
+                try:
+                    open_orders = await self.get_open_orders(symbol)
+                    for order in open_orders:
+                        if order['type'] in ['STOP_MARKET', 'TAKE_PROFIT_MARKET']:
+                            # Don't cancel the new ones we just created
+                            if (sl_order_id and order['orderId'] == sl_order_id) or (tp_order_id and order['orderId'] == tp_order_id):
+                                continue
+                            await self.cancel_order(symbol, order['orderId'])
+                except Exception as e:
+                    logger.log_error(f"Error cancelling old SL/TP orders for {symbol}: {e}")
         # After all, log all open orders for all symbols
         open_orders = await self.get_open_orders()
         if open_orders:
