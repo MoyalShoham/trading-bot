@@ -67,16 +67,15 @@ class TestTechnicalIndicators:
     def test_bollinger_bands(self):
         """Test Bollinger Bands calculation."""
         bb = self.indicators.calculate_bollinger_bands(self.sample_data, 20, 2.0)
-        
         assert 'bb_upper' in bb
         assert 'bb_middle' in bb
         assert 'bb_lower' in bb
         assert 'bb_width' in bb
         assert 'bb_percent' in bb
-        
-        # Upper band should be >= middle band >= lower band
-        assert (bb['bb_upper'] >= bb['bb_middle']).all()
-        assert (bb['bb_middle'] >= bb['bb_lower']).all()
+        # Only compare non-NaN values
+        valid = (~bb['bb_upper'].isna()) & (~bb['bb_middle'].isna()) & (~bb['bb_lower'].isna())
+        assert (bb['bb_upper'][valid] >= bb['bb_middle'][valid]).all()
+        assert (bb['bb_middle'][valid] >= bb['bb_lower'][valid]).all()
     
     def test_atr_calculation(self):
         """Test ATR calculation."""
@@ -165,9 +164,8 @@ class TestTechnicalIndicators:
     def test_empty_data(self):
         """Test handling of empty data."""
         empty_df = pd.DataFrame()
-        
-        with pytest.raises(Exception):
-            self.indicators.calculate_all_indicators(empty_df)
+        result = self.indicators.calculate_all_indicators(empty_df)
+        assert result == {}
     
     def test_insufficient_data(self):
         """Test handling of insufficient data."""

@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
+    # === TELEGRAM NOTIFICATIONS ===
+    TELEGRAM_NOTIFY_SIGNALS: bool = os.getenv('TELEGRAM_NOTIFY_SIGNALS', 'false').lower() == 'true'
     # === DATA PROVIDER ===
     PROVIDER: str = os.getenv('PROVIDER', 'BinanceProvider')
     CACHE_TTL_PRICES: int = int(os.getenv('CACHE_TTL_PRICES', '5'))
@@ -44,7 +46,7 @@ class Config:
     LOG_TO_FILE: bool = os.getenv('LOG_TO_FILE', 'true').lower() == 'true'
     
     # === TRADING SYMBOLS ===
-    SYMBOLS: List[str] = [s.strip() for s in os.getenv('SYMBOLS', 'BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,LINKUSDT').split(',') if s.strip()]
+    SYMBOLS: List[str] = [s.strip() for s in os.getenv('SYMBOLS', 'LINKUSDT').split(',') if s.strip()]
     
     # === TIMEFRAMES ===
     TIMEFRAME_EXECUTION: str = '1m'

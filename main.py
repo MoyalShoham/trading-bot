@@ -451,10 +451,26 @@ async def telegram_command_polling_loop():
 
 async def main():
     """Main entry point."""
+    async def set_telegram_commands():
+        """Set Telegram bot command menu for user-friendly / commands."""
+        import aiohttp
+        from config import config
+        commands = [
+            {"command": "portfolio", "description": "Show portfolio balance"},
+            {"command": "status", "description": "Show bot status"},
+            {"command": "positions", "description": "Show open positions"},
+            {"command": "closeallactivepositions", "description": "Close all open positions"}
+        ]
+        url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/setMyCommands"
+        data = {"commands": commands}
+        async with aiohttp.ClientSession() as session:
+            await session.post(url, json=data)
+
     try:
         bot = TradingBot()
         signal.signal(signal.SIGINT, bot.signal_handler)
         signal.signal(signal.SIGTERM, bot.signal_handler)
+        await set_telegram_commands()
         # Run bot and Telegram polling concurrently
         await asyncio.gather(
             bot.run(),
