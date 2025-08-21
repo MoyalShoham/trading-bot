@@ -60,15 +60,30 @@ class BinanceTrader:
             side = position.get('side')
             entry_price = position.get('entry_price')
             quantity = position.get('quantity', position.get('size', 0))
+            unrealized_pnl = position.get('unrealized_pnl', 0)
             if not side or not entry_price or not quantity:
                 logger.log_warning(f"Missing data for position {symbol}, skipping SLTP set.")
                 continue
+            # Get current price for trailing logic
+            current_price = await self.get_symbol_price(symbol)
+            if not current_price:
+                logger.log_warning(f"Could not fetch current price for {symbol}, skipping SLTP set.")
+                continue
+            # Trailing stop: if PnL is positive, move SL to entry or entry+profit buffer
+            profit_buffer = 0.001  # 0.1% profit lock
             if side == 'long':
-                stop_loss_price = entry_price * (1 - self.stop_loss_percent)
+                # If in profit, move SL to entry + buffer
+                if current_price > entry_price:
+                    stop_loss_price = entry_price * (1 + profit_buffer)
+                else:
+                    stop_loss_price = entry_price * (1 - self.stop_loss_percent)
                 take_profit_price = entry_price * (1 + self.take_profit_percent)
                 order_side = 'BUY'
             elif side == 'short':
-                stop_loss_price = entry_price * (1 + self.stop_loss_percent)
+                if current_price < entry_price:
+                    stop_loss_price = entry_price * (1 - profit_buffer)
+                else:
+                    stop_loss_price = entry_price * (1 + self.stop_loss_percent)
                 take_profit_price = entry_price * (1 - self.take_profit_percent)
                 quantity = round_quantity(symbol, quantity)
                 order_side = 'SELL'
@@ -312,25 +327,26 @@ class BinanceTrader:
             Position size in base asset
         """
         try:
+            # Estimate taker fee (Binance default: 0.04%)
+            fee_rate = 0.0004
             # Calculate risk amount
             risk_amount = self.balance * self.risk_per_trade
-            
             # Calculate price difference
             if entry_price > stop_loss_price:  # Long position
                 price_diff = entry_price - stop_loss_price
             else:  # Short position
                 price_diff = stop_loss_price - entry_price
-            
-            # Calculate position size
-            position_size = risk_amount / price_diff
-            
-            # Apply maximum position size limit
-            max_size = self.balance * self.max_position_size / entry_price
+            # Calculate position size (including fee)
+            position_size = risk_amount / (price_diff + (entry_price * fee_rate))
+            # Subtract open position margin from available balance
+            used_margin = 0.0
+            for pos in self.positions.values():
+                used_margin += abs(pos.get('entry_price', 0) * pos.get('quantity', 0)) / self.max_leverage
+            available_balance = max(0, self.balance - used_margin)
+            max_size = available_balance * self.max_position_size / entry_price
             position_size = min(position_size, max_size)
-            
-            logger.log_info(f"Calculated position size: {position_size:.6f} for {symbol}")
+            logger.log_info(f"Calculated position size: {position_size:.6f} for {symbol} (fee adj, avail bal: {available_balance:.2f})")
             return position_size
-            
         except Exception as e:
             logger.log_error(f"Error calculating position size: {str(e)}")
             return 0.0
@@ -604,6 +620,16 @@ class BinanceTrader:
                 logger.log_warning(f"Risk limits exceeded for {symbol}")
                 return None
 
+            # Balance check (absolute, not % of starting)
+            if self.balance < self.min_balance_threshold:
+                logger.log_warning(f"Balance {self.balance:.2f} below minimum threshold {self.min_balance_threshold}")
+                return None
+
+            # Only allow one open position per symbol
+            if symbol in self.positions:
+                logger.log_info(f"Position already open for {symbol}, skipping new entry.")
+                return None
+
             # Determine side and prices (always set SLTP for new positions)
             if signal_type == 'long_bias':
                 side = 'BUY'
@@ -628,32 +654,8 @@ class BinanceTrader:
                 logger.log_error(f"Invalid position size calculated: {quantity}")
                 return None
 
-            # Position tracking for PnL
-            prev_position = self.positions.get(symbol)
             realized_pnl = 0.0
             closing_trade = False
-
-            # If there is an open position in the opposite direction, close it and calculate PnL
-            if prev_position:
-                prev_side = prev_position['side']
-                prev_entry = prev_position['entry_price']
-                prev_qty = round_quantity(symbol, prev_position['quantity'])
-                if (side == 'BUY' and prev_side == 'short') or (side == 'SELL' and prev_side == 'long'):
-                    closing_trade = True
-                    # Calculate PnL
-                    if prev_side == 'long':
-                        realized_pnl = (current_price - prev_entry) * prev_qty
-                    else:
-                        realized_pnl = (prev_entry - current_price) * prev_qty
-                    self.balance += realized_pnl
-                    logger.log_info(f"Closed {prev_side} position for {symbol} at {current_price}, PnL: {realized_pnl:.4f}, New balance: {self.balance:.4f}")
-                    # Remove position after closing
-                    self.positions.pop(symbol)
-                    # Reset/check risk limits after closing
-                    risk_status = self.check_risk_limits()
-                    if not risk_status['overall_ok']:
-                        logger.log_warning(f"Risk limits exceeded for {symbol} after closing position")
-                        return None
 
             # Place the order (always pass SLTP)
             order_result = await self.place_order(
@@ -666,16 +668,14 @@ class BinanceTrader:
             )
 
             if order_result:
-                # If opening a new position, track it
-                if not closing_trade:
-                    self.positions[symbol] = {
-                        'side': 'long' if side == 'BUY' else 'short',
-                        'entry_price': current_price,
-                        'quantity': quantity,
-                        'sl_order_id': None,
-                        'tp_order_id': None
-                    }
-
+                # Track new position
+                self.positions[symbol] = {
+                    'side': 'long' if side == 'BUY' else 'short',
+                    'entry_price': current_price,
+                    'quantity': quantity,
+                    'sl_order_id': None,
+                    'tp_order_id': None
+                }
                 trade_data = {
                     'symbol': symbol,
                     'side': side,
