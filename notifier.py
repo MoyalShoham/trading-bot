@@ -73,33 +73,118 @@ class TelegramNotifier:
         Handle Telegram bot commands: /portfolio, /status, /positions, /closeAllActivePositions
         """
         from trader import trader
+        import aiohttp
         command = command.strip().lower()
-        if command == '/portfolio':
+        if command in ['/portfolio', 'portfolio']:
+            # Fetch latest account info for margin, balance
+            margin_balance = None
+            total_unrealized_pnl = 0.0
+            try:
+                response = await trader._make_request('GET', '/fapi/v2/account', signed=True)
+                if response:
+                    margin_balance = float(response.get('totalMarginBalance', 0.0))
+                    # Recalculate unrealized PnL using latest mark price
+                    for pos in response.get('positions', []):
+                        amt = float(pos.get('positionAmt', 0.0))
+                        entry = float(pos.get('entryPrice', 0.0))
+                        symbol = pos.get('symbol', None)
+                        if symbol and amt != 0:
+                            # Fetch mark price
+                            mark_price = None
+                            try:
+                                mark_resp = await trader._make_request('GET', '/fapi/v1/premiumIndex', {'symbol': symbol}, signed=False)
+                                if mark_resp and 'markPrice' in mark_resp:
+                                    mark_price = float(mark_resp['markPrice'])
+                            except Exception:
+                                pass
+                            if mark_price is not None:
+                                if amt > 0:
+                                    pnl = (mark_price - entry) * amt
+                                else:
+                                    pnl = (entry - mark_price) * abs(amt)
+                                total_unrealized_pnl += pnl
+                            else:
+                                total_unrealized_pnl += float(pos.get('unRealizedProfit', 0.0))
+            except Exception:
+                pass
             balance = getattr(trader, 'balance', 0.0)
-            msg = f"\U0001F4B0 <b>Portfolio</b>\n<b>Balance:</b> <code>${balance:,.2f}</code>"
+            msg = (
+                f"\U0001F4B0 <b>Portfolio Overview</b>\n\n"
+                f"<b>Wallet Balance:</b> <code>${balance:,.2f}</code>\n"
+                f"<b>Margin Balance:</b> <code>${margin_balance if margin_balance is not None else 'N/A':,}</code>\n"
+                f"<b>Unrealized PnL:</b> <code>${total_unrealized_pnl:,.2f}</code>\n"
+                f"\n<i>Use /positions to see open trades.</i>"
+            )
             return await self._send_message(msg, parse_mode='HTML')
-        if command == '/status':
-            # Show bot status (basic info)
+        if command in ['/status', 'status']:
+            # Try to get stats from TradingBot (import main and get instance if possible)
             total_signals = getattr(trader, 'total_signals', 0)
             total_trades = getattr(trader, 'total_trades', 0)
             total_pnl = getattr(trader, 'total_pnl', 0.0)
-            msg = f"\U0001F4CA <b>Status</b>\nSignals: <code>{total_signals}</code>\nTrades: <code>{total_trades}</code>\nPnL: <code>${total_pnl:,.2f}</code>"
+            start_time = getattr(trader, 'start_time', None)
+            if start_time:
+                from datetime import datetime
+                runtime = datetime.now() - start_time
+                runtime_str = str(runtime).split('.')[0]
+            else:
+                runtime_str = 'N/A'
+            msg = (
+                f"\U0001F4CA <b>Bot Status</b>\n\n"
+                f"<b>Signals:</b> <code>{total_signals}</code>\n"
+                f"<b>Trades:</b> <code>{total_trades}</code>\n"
+                f"<b>PnL:</b> <code>${total_pnl:,.2f}</code>\n"
+                f"<b>Uptime:</b> <code>{runtime_str}</code>\n"
+                f"\n<i>Use /portfolio or /positions for more info.</i>"
+            )
             return await self._send_message(msg, parse_mode='HTML')
-        if command == '/positions':
+        if command in ['/positions', 'positions']:
             positions = getattr(trader, 'positions', {})
             if not positions:
                 msg = "\U0001F4CB <b>Positions</b>\nNo open positions."
             else:
-                lines = ["\U0001F4CB <b>Open Positions</b>"]
+                lines = ["\U0001F4CB <b>Open Positions</b>\n"]
+                async def get_mark_price(symbol):
+                    try:
+                        resp = await trader._make_request('GET', '/fapi/v1/premiumIndex', {'symbol': symbol}, signed=False)
+                        if resp and 'markPrice' in resp:
+                            return float(resp['markPrice'])
+                    except Exception:
+                        pass
+                    return None
                 for sym, pos in positions.items():
                     side = pos.get('side', 'N/A')
                     qty = pos.get('quantity', pos.get('size', 0))
                     entry = pos.get('entry_price', 0)
                     lev = pos.get('leverage', getattr(trader, 'max_leverage', 1))
-                    lines.append(f"<code>{sym}</code> | <b>{side}</b> | Qty: <code>{qty}</code> | Entry: <code>${entry}</code> | Lev: <code>{lev}x</code>")
+                    # Recalculate unrealized PnL and ROI using mark price
+                    mark_price = await get_mark_price(sym)
+                    if mark_price is not None:
+                        if side == 'long':
+                            unrealized = (mark_price - entry) * float(qty)
+                            roi = ((mark_price - entry) / entry) * 100 if entry else 0.0
+                        elif side == 'short':
+                            unrealized = (entry - mark_price) * float(qty)
+                            roi = ((entry - mark_price) / entry) * 100 if entry else 0.0
+                        else:
+                            unrealized = 0.0
+                            roi = 0.0
+                    else:
+                        unrealized = pos.get('unrealized_pnl', 0.0)
+                        roi = 0.0
+                    lines.append(
+                        f"<b>{sym}</b>\n"
+                        f"  Side: <b>{side.upper()}</b>\n"
+                        f"  Qty: <code>{qty}</code>\n"
+                        f"  Entry: <code>${entry}</code>\n"
+                        f"  Mark: <code>${mark_price if mark_price is not None else 'N/A'}</code>\n"
+                        f"  Lev: <code>{lev}x</code>\n"
+                        f"  Unrealized: <code>${unrealized:,.2f}</code>\n"
+                        f"  ROI: <code>{roi:.2f}%</code>\n"
+                        "----------------------"
+                    )
                 msg = '\n'.join(lines)
             return await self._send_message(msg, parse_mode='HTML')
-        if command == '/closeallactivepositions':
+        if command in ['/closeallactivepositions', 'closeallactivepositions']:
             positions = getattr(trader, 'positions', {})
             closed = 0
             for sym, pos in list(positions.items()):
@@ -110,7 +195,7 @@ class TelegramNotifier:
                     closed += 1
             msg = f"\U00002705 <b>Closed {closed} active positions.</b>"
             return await self._send_message(msg, parse_mode='HTML')
-        msg = "\U00002753 <b>Unknown command.</b> Available: /portfolio, /status, /positions, /closeAllActivePositions"
+        msg = "\U00002753 <b>Unknown command.</b>\nAvailable: /portfolio, /status, /positions, /closeallactivepositions"
         return await self._send_message(msg, parse_mode='HTML')
 
     
@@ -247,11 +332,13 @@ class TelegramNotifier:
         Returns:
             True if notification sent successfully
         """
+        from config import config
+        if not getattr(config, 'TELEGRAM_NOTIFY_SIGNALS', False):
+            return False
         try:
             if not signal:
                 logger.log_warning("No signal data provided for notification")
                 return False
-            
             # Extract data
             symbol = signal.get('symbol', 'UNKNOWN')
             signal_type = signal.get('signal', 'no-trade')
@@ -289,7 +376,6 @@ class TelegramNotifier:
             )
             # Send message
             return await self._send_message(message, parse_mode='HTML')
-            
         except Exception as e:
             logger.log_error(f"Error sending signal notification: {str(e)}")
             return False

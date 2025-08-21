@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
+    # === TELEGRAM NOTIFICATIONS ===
+    TELEGRAM_NOTIFY_SIGNALS: bool = os.getenv('TELEGRAM_NOTIFY_SIGNALS', 'false').lower() == 'true'
     # === DATA PROVIDER ===
     PROVIDER: str = os.getenv('PROVIDER', 'BinanceProvider')
     CACHE_TTL_PRICES: int = int(os.getenv('CACHE_TTL_PRICES', '5'))
