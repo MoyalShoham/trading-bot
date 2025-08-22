@@ -54,53 +54,48 @@ class BinanceTrader:
     async def set_sltp_for_existing_positions(self):
         """
         Set Stop Loss and Take Profit orders for all existing open positions.
+        Implements trailing stop: if PnL is positive, set SL based on current market price.
         Only cancels old SL/TP orders after successfully creating new ones.
         """
+        trailing_percent = getattr(config, 'TRAILING_STOP_PERCENT', self.stop_loss_percent)
         for symbol, position in self.positions.items():
             side = position.get('side')
             entry_price = position.get('entry_price')
             quantity = position.get('quantity', position.get('size', 0))
-            unrealized_pnl = position.get('unrealized_pnl', 0)
             if not side or not entry_price or not quantity:
                 logger.log_warning(f"Missing data for position {symbol}, skipping SLTP set.")
                 continue
-            # Get current price for trailing logic
             current_price = await self.get_symbol_price(symbol)
             if not current_price:
                 logger.log_warning(f"Could not fetch current price for {symbol}, skipping SLTP set.")
                 continue
-            # Trailing stop: if PnL is positive, move SL to entry or entry+profit buffer
-            profit_buffer = 0.001  # 0.1% profit lock
+            # Trailing stop: if PnL is positive, move SL to current price (trailing), else use entry price
             if side == 'long':
-                # If in profit, move SL to entry + buffer
                 if current_price > entry_price:
-                    stop_loss_price = entry_price * (1 + profit_buffer)
+                    stop_loss_price = current_price * (1 - trailing_percent)
                 else:
                     stop_loss_price = entry_price * (1 - self.stop_loss_percent)
                 take_profit_price = entry_price * (1 + self.take_profit_percent)
-                order_side = 'BUY'
+                sltp_order_side = 'SELL'  # Always opposite to position
             elif side == 'short':
                 if current_price < entry_price:
-                    stop_loss_price = entry_price * (1 - profit_buffer)
+                    stop_loss_price = current_price * (1 + trailing_percent)
                 else:
                     stop_loss_price = entry_price * (1 + self.stop_loss_percent)
                 take_profit_price = entry_price * (1 - self.take_profit_percent)
-                quantity = round_quantity(symbol, quantity)
-                order_side = 'SELL'
+                sltp_order_side = 'BUY'  # Always opposite to position
             else:
                 logger.log_warning(f"Unknown side for position {symbol}, skipping SLTP set.")
                 continue
-            # Round prices and quantity
             quantity = round_quantity(symbol, quantity)
             stop_loss_price = round_price(symbol, stop_loss_price)
             take_profit_price = round_price(symbol, take_profit_price)
-            # Place stop loss and take profit orders with error handling
             sl_order_id = None
             tp_order_id = None
             sl_error = None
             tp_error = None
             try:
-                sl_order_id = await self._place_stop_loss(symbol, order_side, quantity, stop_loss_price)
+                sl_order_id = await self._place_stop_loss(symbol, sltp_order_side, quantity, stop_loss_price)
                 if sl_order_id:
                     position['sl_order_id'] = sl_order_id
                 logger.log_info(f"SL set for {symbol} at {stop_loss_price}")
@@ -108,14 +103,14 @@ class BinanceTrader:
                 sl_error = e
                 logger.log_error(f"Failed to set SL for {symbol}: {e}")
             try:
-                tp_order_id = await self._place_take_profit(symbol, order_side, quantity, take_profit_price)
+                tp_order_id = await self._place_take_profit(symbol, sltp_order_side, quantity, take_profit_price)
                 if tp_order_id:
                     position['tp_order_id'] = tp_order_id
                 logger.log_info(f"TP set for {symbol} at {take_profit_price}")
             except Exception as e:
                 tp_error = e
                 logger.log_error(f"Failed to set TP for {symbol}: {e}")
-            # Only if both SL and TP were set (or at least attempted), then cancel old ones
+            # Only if both SL and TP were set (or at least attempted), then cancel old ones (except the new ones)
             if (sl_order_id or sl_error) and (tp_order_id or tp_error):
                 try:
                     open_orders = await self.get_open_orders(symbol)
@@ -127,10 +122,9 @@ class BinanceTrader:
                             await self.cancel_order(symbol, order['orderId'])
                 except Exception as e:
                     logger.log_error(f"Error cancelling old SL/TP orders for {symbol}: {e}")
-        # After all, log all open orders for all symbols
         open_orders = await self.get_open_orders()
         if open_orders:
-            logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}")
+            logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}" )
         else:
             logger.log_info("No open orders after SLTP set.")
     async def initialize(self):
