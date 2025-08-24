@@ -40,6 +40,9 @@ class Config:
     
     # === DRY RUN MODE ===
     DRY_RUN: bool = os.getenv('DRY_RUN', 'false').lower() == 'true'
+
+    # === SLTP MINIMUM DISTANCE ===
+    SLTP_MIN_DISTANCE_PERCENT: float = float(os.getenv('SLTP_MIN_DISTANCE_PERCENT', '0.05'))  # 2% minimum distance for SL/TP
     
     # === LOGGING ===
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')

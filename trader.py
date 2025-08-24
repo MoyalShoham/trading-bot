@@ -54,8 +54,7 @@ class BinanceTrader:
     async def set_sltp_for_existing_positions(self):
         """
         Set Stop Loss and Take Profit orders for all existing open positions.
-        Implements trailing stop: if PnL is positive, set SL based on current market price.
-        Only cancels old SL/TP orders after successfully creating new ones.
+        Implements trailing stop: only replace SL/TP if the new one is better. Never delete existing if new fails.
         """
         trailing_percent = getattr(config, 'TRAILING_STOP_PERCENT', self.stop_loss_percent)
         for symbol, position in self.positions.items():
@@ -69,59 +68,90 @@ class BinanceTrader:
             if not current_price:
                 logger.log_warning(f"Could not fetch current price for {symbol}, skipping SLTP set.")
                 continue
-            # Trailing stop: if PnL is positive, move SL to current price (trailing), else use entry price
+            # Calculate new SL/TP prices
             if side == 'long':
                 if current_price > entry_price:
                     stop_loss_price = current_price * (1 - trailing_percent)
                 else:
                     stop_loss_price = entry_price * (1 - self.stop_loss_percent)
                 take_profit_price = entry_price * (1 + self.take_profit_percent)
-                sltp_order_side = 'SELL'  # Always opposite to position
+                sltp_order_side = 'SELL'
             elif side == 'short':
                 if current_price < entry_price:
                     stop_loss_price = current_price * (1 + trailing_percent)
                 else:
                     stop_loss_price = entry_price * (1 + self.stop_loss_percent)
                 take_profit_price = entry_price * (1 - self.take_profit_percent)
-                sltp_order_side = 'BUY'  # Always opposite to position
+                sltp_order_side = 'BUY'
             else:
                 logger.log_warning(f"Unknown side for position {symbol}, skipping SLTP set.")
                 continue
             quantity = round_quantity(symbol, quantity)
             stop_loss_price = round_price(symbol, stop_loss_price)
             take_profit_price = round_price(symbol, take_profit_price)
+
+            # Fetch open SL/TP orders for this symbol
+            open_orders = await self.get_open_orders(symbol)
+            existing_sl = None
+            existing_tp = None
+            for order in open_orders:
+                if order['type'] == 'STOP_MARKET':
+                    existing_sl = order
+                elif order['type'] == 'TAKE_PROFIT_MARKET':
+                    existing_tp = order
+
+            # --- STOP LOSS LOGIC ---
+            place_new_sl = True
+            if existing_sl:
+                old_sl_price = float(existing_sl['stopPrice'])
+                # For long: new SL must be higher (closer to price), for short: new SL must be lower
+                if side == 'long' and stop_loss_price <= old_sl_price:
+                    place_new_sl = False
+                elif side == 'short' and stop_loss_price >= old_sl_price:
+                    place_new_sl = False
             sl_order_id = None
-            tp_order_id = None
             sl_error = None
-            tp_error = None
-            try:
-                sl_order_id = await self._place_stop_loss(symbol, sltp_order_side, quantity, stop_loss_price)
-                if sl_order_id:
-                    position['sl_order_id'] = sl_order_id
-                logger.log_info(f"SL set for {symbol} at {stop_loss_price}")
-            except Exception as e:
-                sl_error = e
-                logger.log_error(f"Failed to set SL for {symbol}: {e}")
-            try:
-                tp_order_id = await self._place_take_profit(symbol, sltp_order_side, quantity, take_profit_price)
-                if tp_order_id:
-                    position['tp_order_id'] = tp_order_id
-                logger.log_info(f"TP set for {symbol} at {take_profit_price}")
-            except Exception as e:
-                tp_error = e
-                logger.log_error(f"Failed to set TP for {symbol}: {e}")
-            # Only if both SL and TP were set (or at least attempted), then cancel old ones (except the new ones)
-            if (sl_order_id or sl_error) and (tp_order_id or tp_error):
+            if place_new_sl:
                 try:
-                    open_orders = await self.get_open_orders(symbol)
-                    for order in open_orders:
-                        if order['type'] in ['STOP_MARKET', 'TAKE_PROFIT_MARKET']:
-                            # Don't cancel the new ones we just created
-                            if (sl_order_id and order['orderId'] == sl_order_id) or (tp_order_id and order['orderId'] == tp_order_id):
-                                continue
-                            await self.cancel_order(symbol, order['orderId'])
+                    sl_order_id = await self._place_stop_loss(symbol, sltp_order_side, quantity, stop_loss_price)
+                    if sl_order_id:
+                        position['sl_order_id'] = sl_order_id
+                        logger.log_info(f"SL set for {symbol} at {stop_loss_price}")
+                        # Only cancel old SL if new one succeeded
+                        if existing_sl:
+                            await self.cancel_order(symbol, existing_sl['orderId'])
                 except Exception as e:
-                    logger.log_error(f"Error cancelling old SL/TP orders for {symbol}: {e}")
+                    sl_error = e
+                    logger.log_error(f"Failed to set SL for {symbol}: {e}")
+            else:
+                logger.log_info(f"Existing SL for {symbol} is better or equal, skipping new SL.")
+
+            # --- TAKE PROFIT LOGIC ---
+            place_new_tp = True
+            if existing_tp:
+                old_tp_price = float(existing_tp['stopPrice'])
+                # For long: new TP must be higher (more profit), for short: new TP must be lower
+                if side == 'long' and take_profit_price <= old_tp_price:
+                    place_new_tp = False
+                elif side == 'short' and take_profit_price >= old_tp_price:
+                    place_new_tp = False
+            tp_order_id = None
+            tp_error = None
+            if place_new_tp:
+                try:
+                    tp_order_id = await self._place_take_profit(symbol, sltp_order_side, quantity, take_profit_price)
+                    if tp_order_id:
+                        position['tp_order_id'] = tp_order_id
+                        logger.log_info(f"TP set for {symbol} at {take_profit_price}")
+                        # Only cancel old TP if new one succeeded
+                        if existing_tp:
+                            await self.cancel_order(symbol, existing_tp['orderId'])
+                except Exception as e:
+                    tp_error = e
+                    logger.log_error(f"Failed to set TP for {symbol}: {e}")
+            else:
+                logger.log_info(f"Existing TP for {symbol} is better or equal, skipping new TP.")
+
         open_orders = await self.get_open_orders()
         if open_orders:
             logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}" )
