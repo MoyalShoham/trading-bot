@@ -53,10 +53,10 @@ class BinanceTrader:
 
     async def set_sltp_for_existing_positions(self):
         """
-        Set Stop Loss and Take Profit orders for all existing open positions.
-        Implements trailing stop: only replace SL/TP if the new one is better. Never delete existing if new fails.
+        Set Take Profit and Trailing Stop orders for all existing open positions using Binance native trailing stop.
+        Only cancel old SL if new trailing stop is created successfully.
         """
-        trailing_percent = getattr(config, 'TRAILING_STOP_PERCENT', self.stop_loss_percent)
+        callback_rate = getattr(config, 'TRAILING_STOP_CALLBACK_RATE', 3.0)  # percent, e.g. 1.0 = 1%
         for symbol, position in self.positions.items():
             side = position.get('side')
             entry_price = position.get('entry_price')
@@ -68,26 +68,17 @@ class BinanceTrader:
             if not current_price:
                 logger.log_warning(f"Could not fetch current price for {symbol}, skipping SLTP set.")
                 continue
-            # Calculate new SL/TP prices
+            # Calculate new TP price
             if side == 'long':
-                if current_price > entry_price:
-                    stop_loss_price = current_price * (1 - trailing_percent)
-                else:
-                    stop_loss_price = entry_price * (1 - self.stop_loss_percent)
                 take_profit_price = entry_price * (1 + self.take_profit_percent)
                 sltp_order_side = 'SELL'
             elif side == 'short':
-                if current_price < entry_price:
-                    stop_loss_price = current_price * (1 + trailing_percent)
-                else:
-                    stop_loss_price = entry_price * (1 + self.stop_loss_percent)
                 take_profit_price = entry_price * (1 - self.take_profit_percent)
                 sltp_order_side = 'BUY'
             else:
                 logger.log_warning(f"Unknown side for position {symbol}, skipping SLTP set.")
                 continue
             quantity = round_quantity(symbol, quantity)
-            stop_loss_price = round_price(symbol, stop_loss_price)
             take_profit_price = round_price(symbol, take_profit_price)
 
             # Fetch open SL/TP orders for this symbol
@@ -95,36 +86,35 @@ class BinanceTrader:
             existing_sl = None
             existing_tp = None
             for order in open_orders:
-                if order['type'] == 'STOP_MARKET':
+                if order['type'] == 'TRAILING_STOP_MARKET':
+                    existing_sl = order
+                elif order['type'] == 'STOP_MARKET':
+                    # fallback: treat STOP_MARKET as old SL
                     existing_sl = order
                 elif order['type'] == 'TAKE_PROFIT_MARKET':
                     existing_tp = order
 
-            # --- STOP LOSS LOGIC ---
+            # --- TRAILING STOP LOGIC ---
             place_new_sl = True
-            if existing_sl:
-                old_sl_price = float(existing_sl['stopPrice'])
-                # For long: new SL must be higher (closer to price), for short: new SL must be lower
-                if side == 'long' and stop_loss_price <= old_sl_price:
-                    place_new_sl = False
-                elif side == 'short' and stop_loss_price >= old_sl_price:
-                    place_new_sl = False
+            # If a trailing stop already exists, skip creating a new one
+            if existing_sl and existing_sl['type'] == 'TRAILING_STOP_MARKET':
+                place_new_sl = False
             sl_order_id = None
             sl_error = None
             if place_new_sl:
                 try:
-                    sl_order_id = await self._place_stop_loss(symbol, sltp_order_side, quantity, stop_loss_price)
+                    sl_order_id = await self._place_trailing_stop(symbol, sltp_order_side, quantity, callback_rate)
                     if sl_order_id:
                         position['sl_order_id'] = sl_order_id
-                        logger.log_info(f"SL set for {symbol} at {stop_loss_price}")
+                        logger.log_info(f"Trailing Stop set for {symbol} with callback rate {callback_rate}%")
                         # Only cancel old SL if new one succeeded
-                        if existing_sl:
+                        if existing_sl and existing_sl['type'] != 'TRAILING_STOP_MARKET':
                             await self.cancel_order(symbol, existing_sl['orderId'])
                 except Exception as e:
                     sl_error = e
-                    logger.log_error(f"Failed to set SL for {symbol}: {e}")
+                    logger.log_error(f"Failed to set Trailing Stop for {symbol}: {e}")
             else:
-                logger.log_info(f"Existing SL for {symbol} is better or equal, skipping new SL.")
+                logger.log_info(f"Existing Trailing Stop for {symbol} found, skipping new trailing stop.")
 
             # --- TAKE PROFIT LOGIC ---
             place_new_tp = True
@@ -157,6 +147,31 @@ class BinanceTrader:
             logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}" )
         else:
             logger.log_info("No open orders after SLTP set.")
+
+    async def _place_trailing_stop(self, symbol: str, side: str, quantity: float, callback_rate: float):
+        """Place a native trailing stop order. Returns orderId if successful."""
+        try:
+            ts_side = 'SELL' if side == 'BUY' else 'BUY'
+            quantity = round_quantity(symbol, quantity)
+            # Binance API expects callbackRate as percent (e.g. 1.0 for 1%)
+            ts_params = {
+                'symbol': symbol,
+                'side': ts_side,
+                'type': 'TRAILING_STOP_MARKET',
+                'quantity': quantity,
+                'callbackRate': callback_rate
+                # Do NOT include closePosition for trailing stop
+            }
+            # Optionally, you can add activationPrice if you want advanced control
+            # ts_params['activationPrice'] = ...
+            response = await self._make_request('POST', '/fapi/v1/order', ts_params, signed=True)
+            if response:
+                logger.log_info(f"Trailing stop placed for {symbol} with callback rate {callback_rate}%")
+                return response.get('orderId')
+            return None
+        except Exception as e:
+            logger.log_error(f"Error placing trailing stop: {str(e)}")
+            return None
     async def initialize(self):
         """Ensure aiohttp session is initialized."""
         if not self.session or self.session.closed:

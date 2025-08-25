@@ -52,7 +52,7 @@ class Config:
     SYMBOLS: List[str] = [s.strip() for s in os.getenv('SYMBOLS', 'XRPUSDT').split(',') if s.strip()]
     
     # === TIMEFRAMES ===
-    TIMEFRAME_EXECUTION: str = '1m'
+    TIMEFRAME_EXECUTION: str = '5m'
     TIMEFRAME_CONFIRMATION: str = '5m'
     
     # === BINANCE API ENDPOINTS ===
