@@ -53,61 +53,125 @@ class BinanceTrader:
 
     async def set_sltp_for_existing_positions(self):
         """
-        Set Stop Loss and Take Profit orders for all existing open positions.
-        Cancels ALL open SL/TP orders for each symbol before placing new ones.
+        Set Take Profit and Trailing Stop orders for all existing open positions using Binance native trailing stop.
+        Only cancel old SL if new trailing stop is created successfully.
         """
+        callback_rate = getattr(config, 'TRAILING_STOP_CALLBACK_RATE', 3.0)  # percent, e.g. 1.0 = 1%
         for symbol, position in self.positions.items():
             side = position.get('side')
             entry_price = position.get('entry_price')
             quantity = position.get('quantity', position.get('size', 0))
-            # Cancel ALL open SL/TP orders for this symbol from Binance
-            try:
-                open_orders = await self.get_open_orders(symbol)
-                for order in open_orders:
-                    if order['type'] in ['STOP_MARKET', 'TAKE_PROFIT_MARKET']:
-                        await self.cancel_order(symbol, order['orderId'])
-            except Exception as e:
-                logger.log_error(f"Error cancelling open SL/TP orders for {symbol}: {e}")
             if not side or not entry_price or not quantity:
                 logger.log_warning(f"Missing data for position {symbol}, skipping SLTP set.")
                 continue
+            current_price = await self.get_symbol_price(symbol)
+            if not current_price:
+                logger.log_warning(f"Could not fetch current price for {symbol}, skipping SLTP set.")
+                continue
+            # Calculate new TP price
             if side == 'long':
-                stop_loss_price = entry_price * (1 - self.stop_loss_percent)
                 take_profit_price = entry_price * (1 + self.take_profit_percent)
-                order_side = 'BUY'
+                sltp_order_side = 'SELL'
             elif side == 'short':
-                stop_loss_price = entry_price * (1 + self.stop_loss_percent)
                 take_profit_price = entry_price * (1 - self.take_profit_percent)
-                quantity = round_quantity(symbol, quantity)
-                order_side = 'SELL'
+                sltp_order_side = 'BUY'
             else:
                 logger.log_warning(f"Unknown side for position {symbol}, skipping SLTP set.")
                 continue
-            # Round prices and quantity
             quantity = round_quantity(symbol, quantity)
-            stop_loss_price = round_price(symbol, stop_loss_price)
             take_profit_price = round_price(symbol, take_profit_price)
-            # Place stop loss and take profit orders with error handling
-            try:
-                sl_order_id = await self._place_stop_loss(symbol, order_side, quantity, stop_loss_price)
-                if sl_order_id:
-                    position['sl_order_id'] = sl_order_id
-                logger.log_info(f"SL set for {symbol} at {stop_loss_price}")
-            except Exception as e:
-                logger.log_error(f"Failed to set SL for {symbol}: {e}")
-            try:
-                tp_order_id = await self._place_take_profit(symbol, order_side, quantity, take_profit_price)
-                if tp_order_id:
-                    position['tp_order_id'] = tp_order_id
-                logger.log_info(f"TP set for {symbol} at {take_profit_price}")
-            except Exception as e:
-                logger.log_error(f"Failed to set TP for {symbol}: {e}")
-        # After all, log all open orders for all symbols
+
+            # Fetch open SL/TP orders for this symbol
+            open_orders = await self.get_open_orders(symbol)
+            existing_sl = None
+            existing_tp = None
+            for order in open_orders:
+                if order['type'] == 'TRAILING_STOP_MARKET':
+                    existing_sl = order
+                elif order['type'] == 'STOP_MARKET':
+                    # fallback: treat STOP_MARKET as old SL
+                    existing_sl = order
+                elif order['type'] == 'TAKE_PROFIT_MARKET':
+                    existing_tp = order
+
+            # --- TRAILING STOP LOGIC ---
+            place_new_sl = True
+            # If a trailing stop already exists, skip creating a new one
+            if existing_sl and existing_sl['type'] == 'TRAILING_STOP_MARKET':
+                place_new_sl = False
+            sl_order_id = None
+            sl_error = None
+            if place_new_sl:
+                try:
+                    sl_order_id = await self._place_trailing_stop(symbol, sltp_order_side, quantity, callback_rate)
+                    if sl_order_id:
+                        position['sl_order_id'] = sl_order_id
+                        logger.log_info(f"Trailing Stop set for {symbol} with callback rate {callback_rate}%")
+                        # Only cancel old SL if new one succeeded
+                        if existing_sl and existing_sl['type'] != 'TRAILING_STOP_MARKET':
+                            await self.cancel_order(symbol, existing_sl['orderId'])
+                except Exception as e:
+                    sl_error = e
+                    logger.log_error(f"Failed to set Trailing Stop for {symbol}: {e}")
+            else:
+                logger.log_info(f"Existing Trailing Stop for {symbol} found, skipping new trailing stop.")
+
+            # --- TAKE PROFIT LOGIC ---
+            place_new_tp = True
+            if existing_tp:
+                old_tp_price = float(existing_tp['stopPrice'])
+                # For long: new TP must be higher (more profit), for short: new TP must be lower
+                if side == 'long' and take_profit_price <= old_tp_price:
+                    place_new_tp = False
+                elif side == 'short' and take_profit_price >= old_tp_price:
+                    place_new_tp = False
+            tp_order_id = None
+            tp_error = None
+            if place_new_tp:
+                try:
+                    tp_order_id = await self._place_take_profit(symbol, sltp_order_side, quantity, take_profit_price)
+                    if tp_order_id:
+                        position['tp_order_id'] = tp_order_id
+                        logger.log_info(f"TP set for {symbol} at {take_profit_price}")
+                        # Only cancel old TP if new one succeeded
+                        if existing_tp:
+                            await self.cancel_order(symbol, existing_tp['orderId'])
+                except Exception as e:
+                    tp_error = e
+                    logger.log_error(f"Failed to set TP for {symbol}: {e}")
+            else:
+                logger.log_info(f"Existing TP for {symbol} is better or equal, skipping new TP.")
+
         open_orders = await self.get_open_orders()
         if open_orders:
-            logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}")
+            logger.log_info(f"Open orders after SLTP set: {[{'symbol': o['symbol'], 'type': o['type'], 'side': o['side'], 'stopPrice': o.get('stopPrice'), 'orderId': o['orderId']} for o in open_orders]}" )
         else:
             logger.log_info("No open orders after SLTP set.")
+
+    async def _place_trailing_stop(self, symbol: str, side: str, quantity: float, callback_rate: float):
+        """Place a native trailing stop order. Returns orderId if successful."""
+        try:
+            ts_side = 'SELL' if side == 'BUY' else 'BUY'
+            quantity = round_quantity(symbol, quantity)
+            # Binance API expects callbackRate as percent (e.g. 1.0 for 1%)
+            ts_params = {
+                'symbol': symbol,
+                'side': ts_side,
+                'type': 'TRAILING_STOP_MARKET',
+                'quantity': quantity,
+                'callbackRate': callback_rate
+                # Do NOT include closePosition for trailing stop
+            }
+            # Optionally, you can add activationPrice if you want advanced control
+            # ts_params['activationPrice'] = ...
+            response = await self._make_request('POST', '/fapi/v1/order', ts_params, signed=True)
+            if response:
+                logger.log_info(f"Trailing stop placed for {symbol} with callback rate {callback_rate}%")
+                return response.get('orderId')
+            return None
+        except Exception as e:
+            logger.log_error(f"Error placing trailing stop: {str(e)}")
+            return None
     async def initialize(self):
         """Ensure aiohttp session is initialized."""
         if not self.session or self.session.closed:
@@ -302,25 +366,26 @@ class BinanceTrader:
             Position size in base asset
         """
         try:
+            # Estimate taker fee (Binance default: 0.04%)
+            fee_rate = 0.0004
             # Calculate risk amount
             risk_amount = self.balance * self.risk_per_trade
-            
             # Calculate price difference
             if entry_price > stop_loss_price:  # Long position
                 price_diff = entry_price - stop_loss_price
             else:  # Short position
                 price_diff = stop_loss_price - entry_price
-            
-            # Calculate position size
-            position_size = risk_amount / price_diff
-            
-            # Apply maximum position size limit
-            max_size = self.balance * self.max_position_size / entry_price
+            # Calculate position size (including fee)
+            position_size = risk_amount / (price_diff + (entry_price * fee_rate))
+            # Subtract open position margin from available balance
+            used_margin = 0.0
+            for pos in self.positions.values():
+                used_margin += abs(pos.get('entry_price', 0) * pos.get('quantity', 0)) / self.max_leverage
+            available_balance = max(0, self.balance - used_margin)
+            max_size = available_balance * self.max_position_size / entry_price
             position_size = min(position_size, max_size)
-            
-            logger.log_info(f"Calculated position size: {position_size:.6f} for {symbol}")
+            logger.log_info(f"Calculated position size: {position_size:.6f} for {symbol} (fee adj, avail bal: {available_balance:.2f})")
             return position_size
-            
         except Exception as e:
             logger.log_error(f"Error calculating position size: {str(e)}")
             return 0.0
@@ -594,6 +659,16 @@ class BinanceTrader:
                 logger.log_warning(f"Risk limits exceeded for {symbol}")
                 return None
 
+            # Balance check (absolute, not % of starting)
+            if self.balance < self.min_balance_threshold:
+                logger.log_warning(f"Balance {self.balance:.2f} below minimum threshold {self.min_balance_threshold}")
+                return None
+
+            # Only allow one open position per symbol
+            if symbol in self.positions:
+                logger.log_info(f"Position already open for {symbol}, skipping new entry.")
+                return None
+
             # Determine side and prices (always set SLTP for new positions)
             if signal_type == 'long_bias':
                 side = 'BUY'
@@ -618,32 +693,8 @@ class BinanceTrader:
                 logger.log_error(f"Invalid position size calculated: {quantity}")
                 return None
 
-            # Position tracking for PnL
-            prev_position = self.positions.get(symbol)
             realized_pnl = 0.0
             closing_trade = False
-
-            # If there is an open position in the opposite direction, close it and calculate PnL
-            if prev_position:
-                prev_side = prev_position['side']
-                prev_entry = prev_position['entry_price']
-                prev_qty = round_quantity(symbol, prev_position['quantity'])
-                if (side == 'BUY' and prev_side == 'short') or (side == 'SELL' and prev_side == 'long'):
-                    closing_trade = True
-                    # Calculate PnL
-                    if prev_side == 'long':
-                        realized_pnl = (current_price - prev_entry) * prev_qty
-                    else:
-                        realized_pnl = (prev_entry - current_price) * prev_qty
-                    self.balance += realized_pnl
-                    logger.log_info(f"Closed {prev_side} position for {symbol} at {current_price}, PnL: {realized_pnl:.4f}, New balance: {self.balance:.4f}")
-                    # Remove position after closing
-                    self.positions.pop(symbol)
-                    # Reset/check risk limits after closing
-                    risk_status = self.check_risk_limits()
-                    if not risk_status['overall_ok']:
-                        logger.log_warning(f"Risk limits exceeded for {symbol} after closing position")
-                        return None
 
             # Place the order (always pass SLTP)
             order_result = await self.place_order(
@@ -656,16 +707,14 @@ class BinanceTrader:
             )
 
             if order_result:
-                # If opening a new position, track it
-                if not closing_trade:
-                    self.positions[symbol] = {
-                        'side': 'long' if side == 'BUY' else 'short',
-                        'entry_price': current_price,
-                        'quantity': quantity,
-                        'sl_order_id': None,
-                        'tp_order_id': None
-                    }
-
+                # Track new position
+                self.positions[symbol] = {
+                    'side': 'long' if side == 'BUY' else 'short',
+                    'entry_price': current_price,
+                    'quantity': quantity,
+                    'sl_order_id': None,
+                    'tp_order_id': None
+                }
                 trade_data = {
                     'symbol': symbol,
                     'side': side,

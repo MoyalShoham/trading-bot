@@ -40,16 +40,19 @@ class Config:
     
     # === DRY RUN MODE ===
     DRY_RUN: bool = os.getenv('DRY_RUN', 'false').lower() == 'true'
+
+    # === SLTP MINIMUM DISTANCE ===
+    SLTP_MIN_DISTANCE_PERCENT: float = float(os.getenv('SLTP_MIN_DISTANCE_PERCENT', '0.05'))  # 2% minimum distance for SL/TP
     
     # === LOGGING ===
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
     LOG_TO_FILE: bool = os.getenv('LOG_TO_FILE', 'true').lower() == 'true'
     
     # === TRADING SYMBOLS ===
-    SYMBOLS: List[str] = [s.strip() for s in os.getenv('SYMBOLS', 'LINKUSDT').split(',') if s.strip()]
+    SYMBOLS: List[str] = [s.strip() for s in os.getenv('SYMBOLS', 'XRPUSDT').split(',') if s.strip()]
     
     # === TIMEFRAMES ===
-    TIMEFRAME_EXECUTION: str = '1m'
+    TIMEFRAME_EXECUTION: str = '5m'
     TIMEFRAME_CONFIRMATION: str = '5m'
     
     # === BINANCE API ENDPOINTS ===
