@@ -1,0 +1,51 @@
+# Docker compose for integration testing
+version: '3.8'
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: trading-bot-test
+    environment:
+      - LOG_TO_FILE=false
+      - LOG_LEVEL=DEBUG
+      - DRY_RUN=true
+      - TESTING=true
+      - BINANCE_API_KEY=test_key
+      - BINANCE_SECRET_KEY=test_secret
+      - OPENAI_API_KEY=test_openai_key
+      - TELEGRAM_BOT_TOKEN=test_telegram_token
+      - TELEGRAM_CHAT_ID=test_chat_id
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=trading_bot_test
+      - POSTGRES_USER=test_user
+      - POSTGRES_PASSWORD=test_password
+      - REDIS_HOST=redis
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - test-network
+    command: ["python", "-c", "print('Test container ready'); import time; time.sleep(3600)"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading-bot-redis-test
+    networks:
+      - test-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: trading-bot-postgres-test
+    environment:
+      POSTGRES_DB: trading_bot_test
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge

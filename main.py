@@ -294,6 +294,19 @@ class TradingBot:
     async def run_execution_cycle(self):
         try:
             logger.log_info("Starting execution cycle...")
+            
+            # Real-time order cleanup at start of each cycle
+            if not config.DRY_RUN and config.ENABLE_REALTIME_CLEANUP:
+                try:
+                    cleanup_result = await trader.cleanup_orphaned_orders_realtime()
+                    if cleanup_result.get('orphaned_orders_cancelled', 0) > 0:
+                        logger.log_info(f"CLEANUP: Freed up capital by cleaning {cleanup_result['orphaned_orders_cancelled']} orphaned orders")
+                        # Log available balance increase
+                        if 'actual_positions_count' in cleanup_result:
+                            logger.log_info(f"CLEANUP: Now tracking {cleanup_result['actual_positions_count']} real positions")
+                except Exception as cleanup_e:
+                    logger.log_warning(f"Non-critical cleanup error: {str(cleanup_e)}")
+            
             market_data = await self.fetch_market_data()
             if not market_data:
                 logger.log_warning("No market data received")

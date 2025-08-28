@@ -18,6 +18,7 @@ from config import config
 from logger import logger
 
 from symbol_precision import round_quantity, round_price, SYMBOL_PRECISION
+from wise_position_manager import wise_position_manager
 
 class BinanceTrader:
     async def set_leverage(self, symbol: str, leverage: int) -> bool:
@@ -375,17 +376,55 @@ class BinanceTrader:
                 price_diff = entry_price - stop_loss_price
             else:  # Short position
                 price_diff = stop_loss_price - entry_price
+            
+            if price_diff <= 0:
+                logger.log_warning(f"Invalid price difference for {symbol}: {price_diff}")
+                return 0.0
+            
             # Calculate position size (including fee)
             position_size = risk_amount / (price_diff + (entry_price * fee_rate))
-            # Subtract open position margin from available balance
+            
+            # Calculate used margin more accurately
             used_margin = 0.0
             for pos in self.positions.values():
-                used_margin += abs(pos.get('entry_price', 0) * pos.get('quantity', 0)) / self.max_leverage
-            available_balance = max(0, self.balance - used_margin)
+                position_value = abs(pos.get('entry_price', 0) * pos.get('quantity', 0))
+                # Futures margin = position_value / leverage
+                position_margin = position_value / self.max_leverage
+                used_margin += position_margin
+            
+            # More conservative available balance calculation
+            available_balance = max(0, self.balance * 0.8 - used_margin)  # Keep 20% buffer
+            
+            logger.log_info(f"Balance: ${self.balance:.2f}, Used margin: ${used_margin:.2f}, Available: ${available_balance:.2f}")
             max_size = available_balance * self.max_position_size / entry_price
             position_size = min(position_size, max_size)
+            
+            # Check symbol precision requirements
+            precision_info = SYMBOL_PRECISION.get(symbol, {'quantity': 0})
+            quantity_precision = precision_info.get('quantity', 0)
+            
+            # Ensure minimum notional value ($5 minimum for Binance)
+            position_value = position_size * entry_price
+            min_notional = 5.0  # Binance minimum
+            
+            if position_value < min_notional:
+                # Calculate minimum position size needed
+                min_position_size = min_notional / entry_price
+                
+                # For whole number symbols, round up
+                if quantity_precision == 0:
+                    min_position_size = max(1.0, min_position_size)
+                
+                if available_balance >= min_notional:
+                    position_size = min_position_size
+                    logger.log_info(f"Adjusted {symbol} to minimum notional: {position_size:.6f} units (${(position_size * entry_price):.2f})")
+                else:
+                    logger.log_warning(f"Insufficient balance for minimum {symbol} position: need ${min_notional:.2f}, have ${available_balance:.2f}")
+                    return 0.0
+            
             logger.log_info(f"Calculated position size: {position_size:.6f} for {symbol} (fee adj, avail bal: {available_balance:.2f})")
             return position_size
+            
         except Exception as e:
             logger.log_error(f"Error calculating position size: {str(e)}")
             return 0.0
@@ -570,6 +609,129 @@ class BinanceTrader:
         except Exception as e:
             logger.log_error(f"Error getting open orders: {str(e)}")
             return []
+
+    async def get_actual_positions_from_api(self) -> Dict[str, Dict]:
+        """Get actual positions from Binance API (not internal tracking)."""
+        try:
+            response = await self._make_request('GET', '/fapi/v2/positionRisk', signed=True)
+            
+            actual_positions = {}
+            if response:
+                for pos in response:
+                    symbol = pos['symbol']
+                    position_amt = float(pos['positionAmt'])
+                    
+                    if abs(position_amt) > 0:  # Only positions with actual quantity
+                        actual_positions[symbol] = {
+                            'symbol': symbol,
+                            'quantity': abs(position_amt),
+                            'side': 'long' if position_amt > 0 else 'short',
+                            'entry_price': float(pos['entryPrice']),
+                            'unrealized_pnl': float(pos['unRealizedProfit']),
+                            'percentage': float(pos['percentage'])
+                        }
+            
+            return actual_positions
+            
+        except Exception as e:
+            logger.log_error(f"Error getting actual positions: {e}")
+            return {}
+
+    async def cleanup_orphaned_orders_realtime(self) -> Dict[str, Any]:
+        """Real-time cleanup of orphaned orders during trading cycle."""
+        try:
+            # Get actual positions and open orders
+            actual_positions = await self.get_actual_positions_from_api()
+            open_orders = await self.get_open_orders()
+            
+            orphaned_orders = []
+            cancelled_count = 0
+            
+            # Find orphaned orders
+            for order in open_orders:
+                symbol = order['symbol']
+                order_id = order['orderId']
+                order_type = order['type']
+                
+                # Skip if symbol has actual position
+                if symbol in actual_positions:
+                    continue
+                
+                # Cancel orphaned order
+                try:
+                    params = {
+                        'symbol': symbol,
+                        'orderId': order_id
+                    }
+                    
+                    cancel_response = await self._make_request('DELETE', '/fapi/v1/order', params, signed=True)
+                    
+                    if cancel_response and 'orderId' in cancel_response:
+                        orphaned_orders.append({
+                            'symbol': symbol,
+                            'order_id': order_id,
+                            'type': order_type
+                        })
+                        cancelled_count += 1
+                        logger.log_info(f"CLEANUP: Cancelled orphaned {order_type} order {order_id} for {symbol}")
+                    
+                    # Small delay to avoid rate limits
+                    await asyncio.sleep(0.1)
+                    
+                except Exception as e:
+                    logger.log_warning(f"CLEANUP: Failed to cancel order {order_id} for {symbol}: {e}")
+            
+            # Sync internal position tracking with reality
+            await self.sync_positions_with_reality(actual_positions)
+            
+            result = {
+                'orphaned_orders_cancelled': cancelled_count,
+                'actual_positions_count': len(actual_positions),
+                'total_orders_checked': len(open_orders),
+                'orphaned_orders': orphaned_orders
+            }
+            
+            if cancelled_count > 0:
+                logger.log_info(f"CLEANUP: Freed up capital by cancelling {cancelled_count} orphaned orders")
+            
+            return result
+            
+        except Exception as e:
+            logger.log_error(f"Error in real-time cleanup: {e}")
+            return {'error': str(e)}
+
+    async def sync_positions_with_reality(self, actual_positions: Dict[str, Dict]) -> None:
+        """Sync internal position tracking with actual API positions."""
+        try:
+            # Clear positions that don't exist in reality
+            symbols_to_remove = []
+            for symbol in self.positions:
+                if symbol not in actual_positions:
+                    symbols_to_remove.append(symbol)
+            
+            for symbol in symbols_to_remove:
+                logger.log_info(f"SYNC: Removing phantom position for {symbol}")
+                del self.positions[symbol]
+            
+            # Add positions that exist but aren't tracked
+            for symbol, pos_data in actual_positions.items():
+                if symbol not in self.positions:
+                    self.positions[symbol] = {
+                        'side': pos_data['side'],
+                        'entry_price': pos_data['entry_price'],
+                        'quantity': pos_data['quantity'],
+                        'sl_order_id': None,
+                        'tp_order_id': None,
+                        'confidence': 0.5,  # Default confidence for existing positions
+                        'timestamp': datetime.now().isoformat(),
+                        'synced_from_api': True
+                    }
+                    logger.log_info(f"SYNC: Added missing position tracking for {symbol}")
+            
+            logger.log_info(f"SYNC: Position tracking synced - {len(self.positions)} tracked, {len(actual_positions)} actual")
+            
+        except Exception as e:
+            logger.log_error(f"Error syncing positions: {e}")
     
     async def close_position(self, symbol: str, side: str, quantity: float) -> bool:
         """Close an existing position and cancel TP/SL orders."""
@@ -664,10 +826,37 @@ class BinanceTrader:
                 logger.log_warning(f"Balance {self.balance:.2f} below minimum threshold {self.min_balance_threshold}")
                 return None
 
-            # Only allow one open position per symbol
+            # Check position conflicts - allow upgrades for significantly better signals
             if symbol in self.positions:
-                logger.log_info(f"Position already open for {symbol}, skipping new entry.")
-                return None
+                current_position = self.positions[symbol]
+                current_side = current_position.get('side', 'unknown')
+                
+                # Check if same direction
+                is_same_direction = (
+                    (signal_type == 'long_bias' and current_side == 'long') or 
+                    (signal_type == 'short_bias' and current_side == 'short')
+                )
+                
+                if is_same_direction:
+                    current_confidence = current_position.get('confidence', 0.0)
+                    new_confidence = signal.get('confidence', 0.0)
+                    
+                    # Allow position upgrade if new signal is significantly better
+                    if new_confidence <= current_confidence + 0.2:  # 20% improvement threshold
+                        logger.log_info(f"Position already open for {symbol}, skipping new entry.")
+                        return None
+                    else:
+                        logger.log_info(f"Upgrading {symbol} position: new confidence {new_confidence:.3f} vs current {current_confidence:.3f}")
+                        # Close current position first
+                        old_side = 'BUY' if current_side == 'long' else 'SELL'
+                        old_quantity = current_position.get('quantity', 0)
+                        await self.close_position(symbol, old_side, old_quantity)
+                else:
+                    # Opposite direction - close current position first
+                    logger.log_info(f"Reversing {symbol} position from {current_side} to {'long' if signal_type == 'long_bias' else 'short'}")
+                    old_side = 'BUY' if current_side == 'long' else 'SELL'
+                    old_quantity = current_position.get('quantity', 0)
+                    await self.close_position(symbol, old_side, old_quantity)
 
             # Determine side and prices (always set SLTP for new positions)
             if signal_type == 'long_bias':
@@ -686,12 +875,33 @@ class BinanceTrader:
                 stop_loss_price = current_price * (1 + self.stop_loss_percent)
                 take_profit_price = current_price * (1 - self.take_profit_percent)
 
-            # Calculate and round quantity
-            raw_quantity = self.calculate_position_size(symbol, current_price, stop_loss_price)
+            # Calculate base position size
+            base_quantity = self.calculate_position_size(symbol, current_price, stop_loss_price)
+            
+            # Apply wise position management
+            wise_analysis = wise_position_manager.calculate_wise_position_size(
+                symbol=symbol,
+                base_size=base_quantity,
+                signal_confidence=signal.get('confidence', 0.5),
+                indicators=signal.get('indicators', {}),
+                current_positions=self.positions,
+                balance=self.balance
+            )
+            
+            # Use wise position size
+            raw_quantity = wise_analysis['final_size']
             quantity = round_quantity(symbol, raw_quantity)
+            
             if quantity <= 0:
-                logger.log_error(f"Invalid position size calculated: {quantity}")
+                if wise_analysis.get('correlation_check', {}).get('allowed', True):
+                    logger.log_error(f"Invalid position size calculated: {quantity}")
+                else:
+                    logger.log_warning(f"Position rejected by wise manager: {wise_analysis['correlation_check']['reason']}")
                 return None
+            
+            # Log wise decision
+            if wise_analysis.get('wisdom_applied'):
+                logger.log_info(f"WISE: Position sizing applied for {symbol}: base={base_quantity:.3f} -> wise={raw_quantity:.3f}")
 
             realized_pnl = 0.0
             closing_trade = False
@@ -713,7 +923,9 @@ class BinanceTrader:
                     'entry_price': current_price,
                     'quantity': quantity,
                     'sl_order_id': None,
-                    'tp_order_id': None
+                    'tp_order_id': None,
+                    'confidence': signal.get('confidence', 0.0),
+                    'timestamp': datetime.now().isoformat()
                 }
                 trade_data = {
                     'symbol': symbol,
@@ -726,13 +938,28 @@ class BinanceTrader:
                     'balance': self.balance
                 }
                 logger.log_trade(trade_data)
-                # Only set SLTP if there is still an open position for this symbol
-                if symbol in self.positions:
+                # Hybrid approach: Fixed stop loss + trailing stop for profit protection
+                logger.log_info(f"Initial stop loss and take profit orders placed for {symbol}")
+                
+                # Wait a moment for initial orders to be processed
+                await asyncio.sleep(0.5)
+                
+                # Set up trailing stops if enabled (recommended for profit protection)
+                if config.USE_TRAILING_STOPS and symbol in self.positions:
                     await self.set_sltp_for_existing_positions()
+                
+                # Log portfolio health after new position
+                health_analysis = wise_position_manager.get_position_health_score(self.positions)
+                logger.log_info(f"PORTFOLIO: Health: {health_analysis['health_score']:.2f} ({health_analysis['total_positions']} positions, avg confidence: {health_analysis['avg_confidence']:.2f})")
+                for recommendation in health_analysis['recommendations']:
+                    logger.log_info(f"ADVICE: {recommendation}")
+                
                 return {
                     'success': True,
                     'order': order_result,
-                    'trade_data': trade_data
+                    'trade_data': trade_data,
+                    'wise_analysis': wise_analysis,
+                    'portfolio_health': health_analysis
                 }
             return None
         except Exception as e:

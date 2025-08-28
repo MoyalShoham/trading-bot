@@ -12,6 +12,7 @@ from datetime import datetime
 import time
 
 from config import config
+from ai_performance_tracker import ai_performance_tracker
 from logger import logger
 
 class MarketAdvisor:
@@ -57,26 +58,41 @@ class MarketAdvisor:
             if hasattr(series, 'iloc') and not series.empty:
                 latest_values[name] = float(series.iloc[-1])
         
+        # Get AI performance feedback
+        performance_context = ai_performance_tracker.get_prompt_enhancement()
+        
         prompt = f"""
-You are an expert cryptocurrency market analyst. Analyze the following market data for {symbol} and classify the current market regime.
+You are a PROFITABLE cryptocurrency trading expert with 95% accuracy. Your analysis directly controls real money trades.
 
-MARKET DATA:
+TARGET: MAXIMIZE PROFITS with calculated risks. Be aggressive when opportunities are clear.
+
+MARKET DATA FOR {symbol}:
 {json.dumps(latest_values, indent=2)}
 
-CURRENT POSITION:
-{json.dumps(position_info or {}, indent=2)}
+CURRENT POSITION: {json.dumps(position_info or {}, indent=2)}
 
-ANALYSIS REQUIREMENTS:
-1. Classify the market regime into one of these categories:
-   - "trend-up": Strong upward momentum with clear higher highs/lows
-   - "trend-down": Strong downward momentum with clear lower highs/lows  
-   - "mean-reversion": Price oscillating around a central value
-   - "chop": Sideways movement with no clear direction
-   - "uncertain": Mixed signals, unclear direction
+{performance_context}
 
-2. Provide 3 key factors supporting your classification
-3. Add a risk note if applicable
-4. Rate your confidence (0.0 to 1.0)
+PERFORMANCE CONTEXT:
+- Current portfolio needs MORE profitable signals
+- Previous "uncertain" classifications reduce trading opportunities
+- Risk/Reward target: 2:1 minimum
+- Win rate target: 60%+
+
+CLASSIFICATION RULES (BE MORE DECISIVE):
+- "trend-up": RSI > 55 + EMA alignment + momentum confirmation → STRONG BUY signal
+- "trend-down": RSI < 45 + EMA bearish + momentum down → STRONG SELL signal  
+- "mean-reversion": RSI 30-70 + tight Bollinger Bands + oscillating price → SCALP opportunity
+- "chop": Only use for genuinely conflicting signals (avoid overuse)
+- "uncertain": MINIMIZE - only for truly unclear situations
+
+CONFIDENCE SCORING (AIM HIGHER):
+- 0.85-1.0: Clear trend + strong momentum + volume confirmation
+- 0.70-0.84: Good signals with minor conflicting indicators  
+- 0.60-0.69: Moderate signals, acceptable for execution
+- Below 0.60: Mark as uncertain only if truly unclear
+
+PROFIT FOCUS: Favor trend-following over uncertainty. Better to take calculated risks than miss opportunities.
 
 RESPONSE FORMAT (JSON only):
 {{
@@ -85,7 +101,7 @@ RESPONSE FORMAT (JSON only):
     "timeframe_confirm": "5m", 
     "regime": "trend-up|trend-down|mean-reversion|chop|uncertain",
     "factors": ["factor1", "factor2", "factor3"],
-    "note": "risk note or additional insight",
+    "note": "profit opportunity or risk warning",
     "confidence": 0.85
 }}
 

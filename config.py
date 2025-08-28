@@ -26,7 +26,7 @@ class Config:
     
     # === OPENAI API ===
     OPENAI_API_KEY: str = os.getenv('OPENAI_API_KEY', '')
-    OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+    OPENAI_MODEL: str = os.getenv('OPENAI_MODEL', 'gpt-4o')  # Upgraded for better trading decisions
     
     # === TELEGRAM BOT ===
     TELEGRAM_BOT_TOKEN: str = os.getenv('TELEGRAM_BOT_TOKEN', '')
@@ -42,7 +42,28 @@ class Config:
     DRY_RUN: bool = os.getenv('DRY_RUN', 'false').lower() == 'true'
 
     # === SLTP MINIMUM DISTANCE ===
-    SLTP_MIN_DISTANCE_PERCENT: float = float(os.getenv('SLTP_MIN_DISTANCE_PERCENT', '0.05'))  # 2% minimum distance for SL/TP
+    SLTP_MIN_DISTANCE_PERCENT: float = float(os.getenv('SLTP_MIN_DISTANCE_PERCENT', '0.05'))  # 5% minimum distance for SL/TP
+    
+    # === STOP LOSS STRATEGY ===
+    USE_TRAILING_STOPS: bool = os.getenv('USE_TRAILING_STOPS', 'true').lower() == 'true'
+    TRAILING_STOP_CALLBACK_RATE: float = float(os.getenv('TRAILING_STOP_CALLBACK_RATE', '3.0'))  # 3% trailing stop rate
+    
+    # === PROFIT OPTIMIZATION ===
+    USE_KELLY_CRITERION: bool = os.getenv('USE_KELLY_CRITERION', 'true').lower() == 'true'
+    KELLY_MULTIPLIER: float = float(os.getenv('KELLY_MULTIPLIER', '0.25'))  # Conservative Kelly
+    VOLATILITY_SCALING: bool = os.getenv('VOLATILITY_SCALING', 'true').lower() == 'true'
+    CONFIDENCE_SCALING: bool = os.getenv('CONFIDENCE_SCALING', 'true').lower() == 'true'
+    MIN_SIGNAL_CONFIDENCE: float = float(os.getenv('MIN_SIGNAL_CONFIDENCE', '0.1'))
+    MIN_ADVISOR_CONFIDENCE: float = float(os.getenv('MIN_ADVISOR_CONFIDENCE', '0.6'))
+    
+    # === WISE POSITION MANAGEMENT ===
+    USE_WISE_POSITIONING: bool = os.getenv('USE_WISE_POSITIONING', 'true').lower() == 'true'
+    MAX_CORRELATED_EXPOSURE: float = float(os.getenv('MAX_CORRELATED_EXPOSURE', '0.3'))  # 30% max in correlated assets
+    PORTFOLIO_HEALTH_THRESHOLD: float = float(os.getenv('PORTFOLIO_HEALTH_THRESHOLD', '0.6'))  # Minimum health score
+    
+    # === REAL-TIME ORDER CLEANUP ===
+    ENABLE_REALTIME_CLEANUP: bool = os.getenv('ENABLE_REALTIME_CLEANUP', 'true').lower() == 'true'
+    CLEANUP_EVERY_CYCLE: bool = os.getenv('CLEANUP_EVERY_CYCLE', 'true').lower() == 'true'
     
     # === LOGGING ===
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')

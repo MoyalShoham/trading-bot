@@ -178,24 +178,32 @@ class TradingStrategy:
                 'advisor_confidence': advisor_confidence
             })
             
-            # Calculate combined confidence
-            combined_analysis['confidence'] = (indicator_score + advisor_confidence) / 2
+            # Calculate combined confidence with weighting (favor AI advisor more)
+            base_confidence = (indicator_score * 0.2 + advisor_confidence * 0.8)
             
-            # Determine trading signal based on regime and indicators (less restrictive)
+            # Boost confidence for high AI advisor scores
+            if advisor_confidence > 0.8:
+                base_confidence += 0.1  # 10% boost for exceptional AI confidence
+            elif advisor_confidence > 0.7:
+                base_confidence += 0.05  # 5% boost for strong AI confidence
+            
+            combined_analysis['confidence'] = min(0.95, base_confidence)  # Cap at 95%
+            
+            # Determine trading signal based on regime and indicators (optimized for profit)
             if regime == 'trend-up' and indicator_score > 0.05:
-                if advisor_confidence > 0.3:
+                if advisor_confidence > 0.6:  # Higher threshold for quality
                     combined_analysis['signal'] = 'long_bias'
                     combined_analysis['reason'] = 'Bullish trend with sufficient confidence'
-                    combined_analysis['risk_level'] = 'medium'
+                    combined_analysis['risk_level'] = 'low' if advisor_confidence > 0.8 else 'medium'
                 else:
                     combined_analysis['signal'] = 'no-trade'
                     combined_analysis['reason'] = 'Bullish trend but low advisor confidence'
                     combined_analysis['risk_level'] = 'high'
             elif regime == 'trend-down' and indicator_score < -0.05:
-                if advisor_confidence > 0.3:
+                if advisor_confidence > 0.6:  # Higher threshold for quality
                     combined_analysis['signal'] = 'short_bias'
                     combined_analysis['reason'] = 'Bearish trend with sufficient confidence'
-                    combined_analysis['risk_level'] = 'medium'
+                    combined_analysis['risk_level'] = 'low' if advisor_confidence > 0.8 else 'medium'
                 else:
                     combined_analysis['signal'] = 'no-trade'
                     combined_analysis['reason'] = 'Bearish trend but low advisor confidence'
@@ -221,8 +229,9 @@ class TradingStrategy:
                 combined_analysis['signal'] = 'no-trade'
                 combined_analysis['reason'] = 'Uncertain market conditions'
                 combined_analysis['risk_level'] = 'high'
-            # Additional risk checks (lowered threshold)
-            if combined_analysis['confidence'] < 0.05:
+            # Additional risk checks (optimized for profit)
+            min_confidence = config.MIN_SIGNAL_CONFIDENCE if hasattr(config, 'MIN_SIGNAL_CONFIDENCE') else 0.1
+            if combined_analysis['confidence'] < min_confidence:
                 combined_analysis['signal'] = 'no-trade'
                 combined_analysis['reason'] += ' - Low confidence'
                 combined_analysis['risk_level'] = 'high'

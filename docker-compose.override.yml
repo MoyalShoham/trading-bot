@@ -1,0 +1,19 @@
+# Override file for development
+version: '3.8'
+
+services:
+  trading-bot:
+    build:
+      target: development
+    environment:
+      - LOG_LEVEL=DEBUG
+      - DEVELOPMENT=true
+    volumes:
+      - .:/app:cached  # Hot reload for development
+    ports:
+      - "8080:8080"  # Expose monitoring port
+    command: ["python", "-u", "main.py"]
+
+  # Enable Jupyter by default in development
+  jupyter:
+    profiles: []
